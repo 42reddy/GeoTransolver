@@ -16,7 +16,7 @@ repoints both.
 from pathlib import Path
 
 RAW_DIR = Path("data/raw/extracted/training_data")           # shapenet_car_dataset.py raw meshes
-CACHE_DIR = Path("/kaggle/input/datasets/reddy42/shape-net")                                # cached .npz + manifest.json
+CACHE_DIR = Path("/kaggle/input/datasets/reddy42/shape-net/cache")                                # cached .npz + manifest.json
 CKPT_DIR = Path("checkpoints")                                # training checkpoints
 
 BLENDEDNET_RAW_DIR = Path("data/raw/extracted")               # blendednet_dataset.py raw meshes
