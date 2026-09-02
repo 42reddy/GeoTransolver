@@ -31,5 +31,5 @@ RAW_DIR = Path("data/raw/extracted/training_data")           # shapenet_car_data
 CACHE_DIR = Path("/kaggle/input/datasets/reddy42/shape-net/cache")                                # cached .npz + manifest.json
 CKPT_DIR = Path("checkpoints")                                # training checkpoints
 
-BLENDEDNET_RAW_DIR = Path("/kaggle/working/data/raw/extracted")   # download_blendednet.py output / blendednet_dataset.py raw meshes
-BLENDEDNET_CACHE_DIR = Path("/kaggle/working/data/cache_blendednet")  # separate from CACHE_DIR -- different schema
+BLENDEDNET_RAW_DIR = Path("/tmp/data/raw/extracted")
+BLENDEDNET_CACHE_DIR = Path("/tmp/data/cache_blendednet")
