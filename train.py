@@ -33,13 +33,13 @@ Usage
 import argparse
 import json
 import math
-import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
+from tqdm.auto import tqdm
 
 from shapenet_car_dataset import ShapeNetCarDataset
 from transolver import Transolver
@@ -81,13 +81,18 @@ def make_lr_lambda(total_steps: int, warmup_steps: int):
 # --------------------------------------------------------------------------
 # Train / eval loops
 # --------------------------------------------------------------------------
-def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, grad_clip=1.0):
+def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, grad_clip=1.0,
+              bar_desc=None):
+    """bar_desc=None runs a plain (silent) pass -- used for val/test, which
+    are short enough not to need their own progress bar. Pass a string to
+    show a live batch-level bar -- used for the training pass."""
     train = optimizer is not None
     model.train(mode=train)
     total_loss, total_items = 0.0, 0
     breakdown_sum = {}
 
-    for pos, features, target, mask in loader:
+    iterable = tqdm(loader, desc=bar_desc, leave=False) if bar_desc else loader
+    for pos, features, target, mask in iterable:
         pos, features, target, mask = (t.to(device, non_blocking=True) for t in (pos, features, target, mask))
 
         with torch.set_grad_enabled(train):
@@ -113,6 +118,8 @@ def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, 
         total_items += bs
         for k, v in breakdown.items():
             breakdown_sum[k] = breakdown_sum.get(k, 0.0) + v * bs
+        if bar_desc:
+            iterable.set_postfix(loss=f"{loss.item():.4f}")
 
     avg = total_loss / total_items
     avg_breakdown = {k: v / total_items for k, v in breakdown_sum.items()}
@@ -212,24 +219,26 @@ def main():
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
         best_val = ckpt["best_val"]
-        print(f"resumed from {args.resume} at epoch {start_epoch}, best_val={best_val:.4f}")
+        tqdm.write(f"resumed from {args.resume} at epoch {start_epoch}, best_val={best_val:.4f}")
 
     # ---------------- train ----------------
-    for epoch in range(start_epoch, args.epochs):
-        t0 = time.time()
+    epoch_bar = tqdm(range(start_epoch, args.epochs), desc="epochs")
+    for epoch in epoch_bar:
         train_loss, train_bd = run_epoch(model, fit_loader, out_channels, device,
-                                          optimizer=optimizer, scaler=scaler, grad_clip=args.grad_clip)
+                                          optimizer=optimizer, scaler=scaler, grad_clip=args.grad_clip,
+                                          bar_desc=f"epoch {epoch} train")
         for _ in range(len(fit_loader)):
             scheduler.step()
         val_loss, val_bd = run_epoch(model, val_loader, out_channels, device)
-        dt = time.time() - t0
 
         is_best = val_loss < best_val
         best_val = min(best_val, val_loss)
         lr_now = scheduler.get_last_lr()[0]
-        print(f"epoch {epoch:4d}/{args.epochs} | lr {lr_now:.2e} | "
-              f"train {train_loss:.4f} {train_bd} | val {val_loss:.4f} {val_bd} | "
-              f"{dt:.1f}s{'  * best' if is_best else ''}")
+        epoch_bar.set_postfix(lr=f"{lr_now:.1e}", train=f"{train_loss:.4f}", val=f"{val_loss:.4f}",
+                               best="*" if is_best else "")
+        if is_best:
+            tqdm.write(f"epoch {epoch}: new best val {val_loss:.4f} "
+                       f"(train {train_loss:.4f} {train_bd}, val {val_bd})")
 
         ckpt = {
             "model": model.state_dict(),
@@ -247,8 +256,8 @@ def main():
     # ---------------- final held-out test evaluation ----------------
     best = torch.load(args.ckpt_dir / "best.pt", map_location=device, weights_only=False)
     model.load_state_dict(best["model"])
-    test_loss, test_bd = run_epoch(model, test_loader, out_channels, device)
-    print(f"final test (best checkpoint, epoch {best['epoch']}): loss {test_loss:.4f} {test_bd}")
+    test_loss, test_bd = run_epoch(model, test_loader, out_channels, device, bar_desc="test")
+    tqdm.write(f"final test (best checkpoint, epoch {best['epoch']}): loss {test_loss:.4f} {test_bd}")
 
 
 if __name__ == "__main__":
