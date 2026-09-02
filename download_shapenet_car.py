@@ -1,40 +1,3 @@
-"""
-Download the ShapeNet-Car aerodynamics dataset (Umetani & Bickel, SIGGRAPH
-2018, "Learning Three-dimensional Flow for Interactive Aerodynamic Design")
--- the same 3D benchmark used in the Transolver paper itself
-(github.com/thuml/Transolver/tree/main/Car-Design-ShapeNetCar).
-
-889 car shapes. Each case has a downsampled surface mesh (~3,586 points,
-converged RANS surface pressure) and a downsampled near-field volume mesh
-(~29,500 points, converged velocity) -- together these give a real SDF
-(distance from every volume point to the nearest surface point) instead of
-a degenerate always-zero one, which is why we pull both by default. Raw
-archive is ~1.9 GB, well under the 10 GB you asked for.
-
---------------------------------------------------------------------------
-Verified archive layout (inspected via HTTP Range requests, not guessed)
---------------------------------------------------------------------------
-mlcfd_data.zip
-  mlcfd_data/training_data/param0.tar.gz  (100 cases -- the held-out test fold)
-  mlcfd_data/training_data/param1.tar.gz  (each of param1..param8 ~= training)
-  ...
-  mlcfd_data/training_data/param8.tar.gz
-
-Each param{i}.tar.gz contains, per case:
-  param{i}/<case_hash>/quadpress_smpl.vtk   surface mesh + pressure (point_data "point_scalars")  <- kept
-  param{i}/<case_hash>/hexvelo_smpl.vtk     volume mesh + velocity (point_data "point_vectors")   <- kept (default)
-  param{i}/<case_hash>/press.npy, velo.npy, param1.txt, param2.txt, cd.txt  <- skipped, redundant with the vtk / not needed
-
-By default we extract both vtk files (~2.76 GB total, ~3.1 MB/case). Pass
---surface_only to extract just quadpress_smpl.vtk (~190 MB total) if you
-only want to predict surface pressure and don't need SDF/velocity.
-
-Usage:
-    python download_shapenet_car.py --out_dir data/raw
-    python download_shapenet_car.py --out_dir data/raw --surface_only
-"""
-
-import argparse
 import shutil
 import tarfile
 import zipfile
@@ -119,24 +82,24 @@ def extract(raw_dir: Path, out_dir: Path, keep_archives: bool, surface_only: boo
     return training_dir
 
 
+# ==========================================================================
+# Params -- edit these directly, no CLI flags
+# ==========================================================================
+OUT_DIR = Path("data/raw")
+SKIP_EXTRACT = False
+KEEP_ARCHIVES = False    # True -> keep the downloaded .zip/.tar.gz after extraction (uses more disk)
+SURFACE_ONLY = False     # True -> extract only quadpress_smpl.vtk (surface+pressure); skips
+                          # hexvelo_smpl.vtk (volume+velocity) -- no real SDF, pressure-only targets
+
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--out_dir", type=Path, default=Path("data/raw"))
-    ap.add_argument("--skip_extract", action="store_true")
-    ap.add_argument("--keep_archives", action="store_true",
-                     help="keep the downloaded .zip/.tar.gz after extraction (uses more disk)")
-    ap.add_argument("--surface_only", action="store_true",
-                     help="extract only quadpress_smpl.vtk (surface+pressure); skips hexvelo_smpl.vtk "
-                          "(volume+velocity), which means no real SDF and pressure-only targets")
-    args = ap.parse_args()
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    print(f"Downloading ShapeNet-Car -> {OUT_DIR}")
+    download_file(URL, OUT_DIR / "mlcfd_data.zip")
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"Downloading ShapeNet-Car -> {args.out_dir}")
-    download_file(URL, args.out_dir / "mlcfd_data.zip")
-
-    if not args.skip_extract:
+    if not SKIP_EXTRACT:
         print("Extracting...")
-        extracted = extract(args.out_dir, args.out_dir / "extracted", args.keep_archives, args.surface_only)
+        extracted = extract(OUT_DIR, OUT_DIR / "extracted", KEEP_ARCHIVES, SURFACE_ONLY)
         print(f"Extracted to {extracted}")
     print("Done.")
 

@@ -50,25 +50,16 @@ below if your archive's layout differs.
 
 Requires: pyvista (`pip install pyvista`) for VTK I/O.
 
-Usage:
-    # 1. sanity-check what the discovery heuristics find, no processing
-    python blendednet_dataset.py --raw_dir data/raw/extracted --inspect
-
-    # 2. build the cached, fixed-size point-cloud .npz files
-    python blendednet_dataset.py --raw_dir data/raw/extracted \\
-        --cache_dir data/cache --num_points 4096
-
-    # 3. quick end-to-end wiring check against Transolver
-    python blendednet_dataset.py --cache_dir data/cache --demo
 """
 
-import argparse
 import json
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+from config import BLENDEDNET_CACHE_DIR, BLENDEDNET_RAW_DIR
 
 SURFACE_EXTS = (".vtk", ".vtu", ".vtp")
 META_EXTS = (".json", ".dat", ".csv", ".yaml", ".yml")
@@ -266,30 +257,26 @@ class BlendedNetDataset(Dataset):
         )
 
 
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--raw_dir", type=Path, help="extracted BlendedNet root")
-    ap.add_argument("--cache_dir", type=Path, default=Path("data/cache"))
-    ap.add_argument("--num_points", type=int, default=4096)
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--fields", nargs="*", default=None,
-                     help="explicit VTK point_data array names to use as targets")
-    ap.add_argument("--global_feat_keys", nargs="*", default=None,
-                     help="explicit metadata keys to broadcast as conditioning features")
-    ap.add_argument("--inspect", action="store_true")
-    ap.add_argument("--demo", action="store_true", help="one forward pass through Transolver")
-    args = ap.parse_args()
+# ==========================================================================
+# Params -- edit these directly, no CLI flags. raw_dir/cache_dir come from
+# config.py (edit that file to switch between local and Kaggle).
+# ==========================================================================
+NUM_POINTS = 4096
+SEED = 0
+FIELDS = None              # explicit VTK point_data array names to use as targets, or None
+GLOBAL_FEAT_KEYS = None    # explicit metadata keys to broadcast as conditioning features, or None
+INSPECT = False            # True -> sanity-check discovery heuristics, no processing
+DEMO = False                # True -> skip building the cache, one forward pass through Transolver instead
 
-    if args.inspect:
-        inspect(args.raw_dir)
+
+def main():
+    if INSPECT:
+        inspect(BLENDEDNET_RAW_DIR)
         return
 
-    if args.demo:
+    if DEMO:
         from transolver import Transolver
-        ds = BlendedNetDataset(args.cache_dir)
+        ds = BlendedNetDataset(BLENDEDNET_CACHE_DIR)
         loader = torch.utils.data.DataLoader(ds, batch_size=4, shuffle=True)
         pos, features, target = next(iter(loader))
         model = Transolver(space_dim=3, in_channels=features.shape[-1], out_channels=target.shape[-1])
@@ -299,8 +286,8 @@ def main():
         print(f"pred {pred.shape}, mse loss {loss.item():.4f}")
         return
 
-    build_cache(args.raw_dir, args.cache_dir, args.num_points, args.seed,
-                args.global_feat_keys, args.fields)
+    build_cache(BLENDEDNET_RAW_DIR, BLENDEDNET_CACHE_DIR, NUM_POINTS, SEED,
+                GLOBAL_FEAT_KEYS, FIELDS)
 
 
 if __name__ == "__main__":

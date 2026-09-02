@@ -3,11 +3,11 @@ Download the BlendedNet / BlendedNet++ blended-wing-body (BWB) aircraft
 aerodynamics datasets from Harvard Dataverse.
 
 Usage:
-    python download_blendednet.py --dataset blendednet   --out_dir data/raw
-    python download_blendednet.py --dataset blendednet++ --out_dir data/raw
+No CLI flags -- edit the PARAMS block below main() directly, then run this
+file (IDE run button or `python download_blendednet.py`). Set DATASET to
+"blendednet" or "blendednet++".
 """
 
-import argparse
 import shutil
 import subprocess
 import zipfile
@@ -120,22 +120,24 @@ def extract(raw_dir: Path, dataset: str) -> Path:
     return out_dir
 
 
+# ==========================================================================
+# Params -- edit these directly, no CLI flags
+# ==========================================================================
+DATASET = "blendednet"    # "blendednet" or "blendednet++"
+OUT_DIR = Path("data/raw")
+SKIP_EXTRACT = False
+
+
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--dataset", choices=DATASETS.keys(), default="blendednet")
-    ap.add_argument("--out_dir", type=Path, default=Path("data/raw"))
-    ap.add_argument("--skip_extract", action="store_true")
-    args = ap.parse_args()
-
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    spec = DATASETS[args.dataset]
-    print(f"Downloading {args.dataset} (doi:{spec['doi']}) -> {args.out_dir}")
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    spec = DATASETS[DATASET]
+    print(f"Downloading {DATASET} (doi:{spec['doi']}) -> {OUT_DIR}")
     for file_id, name in spec["files"]:
-        download_file(file_id, args.out_dir / name)
+        download_file(file_id, OUT_DIR / name)
 
-    if not args.skip_extract:
+    if not SKIP_EXTRACT:
         print("Extracting...")
-        out_dir = extract(args.out_dir, args.dataset)
+        out_dir = extract(OUT_DIR, DATASET)
         print(f"Extracted to {out_dir}")
     print("Done.")
 

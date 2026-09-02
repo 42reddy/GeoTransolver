@@ -54,28 +54,16 @@ Transolver consumes a fixed point count per batch item, so each case is
 subsampled to a fixed budget, stratified across surface/exterior so the
 (sparser, 3,586-point) surface class isn't drowned out by the (denser,
 ~28,600-point) exterior class -- see --num_surface_points/--num_exterior_points.
-
-Requires: pyvista, scipy (`pip install pyvista scipy`).
-
-Usage:
-    # 1. build the cached, fixed-size point-cloud .npz files
-    python shapenet_car_dataset.py --raw_dir data/raw/extracted/training_data \\
-        --cache_dir data/cache --num_surface_points 2048 --num_exterior_points 4096
-
-    # 2. quick end-to-end wiring check against Transolver
-    python shapenet_car_dataset.py --cache_dir data/cache --demo
-
-Surface-only fallback (--mode surface, matches a --surface_only download):
-    python shapenet_car_dataset.py --raw_dir ... --cache_dir ... --mode surface --num_points 3000
 """
 
-import argparse
 import json
 from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
+
+from config import RAW_DIR, CACHE_DIR
 
 PRESSURE_FIELD = "point_scalars"  # verified VTK point_data array name (quadpress_smpl.vtk)
 VELOCITY_FIELD = "point_vectors"  # verified VTK point_data array name (hexvelo_smpl.vtk)
@@ -289,28 +277,26 @@ class ShapeNetCarDataset(Dataset):
         )
 
 
-# --------------------------------------------------------------------------
-# CLI
-# --------------------------------------------------------------------------
-def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--raw_dir", type=Path, help="extracted training_data/ root (contains param0..param8)")
-    ap.add_argument("--cache_dir", type=Path, default=Path("data/cache"))
-    ap.add_argument("--mode", choices=["full", "surface"], default="full",
-                     help="full = surface+exterior with real SDF & velocity+pressure targets (needs "
-                          "hexvelo_smpl.vtk); surface = pressure-only, no SDF")
-    ap.add_argument("--num_points", type=int, default=3000, help="[surface mode] points per case")
-    ap.add_argument("--num_surface_points", type=int, default=2048, help="[full mode] surface points per case")
-    ap.add_argument("--num_exterior_points", type=int, default=4096, help="[full mode] exterior points per case")
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--demo", action="store_true", help="one forward pass through Transolver")
-    args = ap.parse_args()
+# ==========================================================================
+# Params -- edit these directly, no CLI flags. raw_dir/cache_dir come from
+# config.py (edit that file to switch between local and Kaggle).
+# ==========================================================================
+MODE = "full"           # "full" = surface+exterior with real SDF & velocity+pressure targets
+                         # (needs hexvelo_smpl.vtk); "surface" = pressure-only, no SDF
+NUM_POINTS = 3000               # [surface mode] points per case
+NUM_SURFACE_POINTS = 2048       # [full mode] surface points per case
+NUM_EXTERIOR_POINTS = 4096      # [full mode] exterior points per case
+SEED = 0
+DEMO = False             # True -> skip building the cache, just run one forward pass through
+                          # Transolver against the existing cache (a quick wiring sanity check)
 
-    if args.demo:
+
+def main():
+    if DEMO:
         from transolver import Transolver
-        manifest = json.loads((args.cache_dir / "manifest.json").read_text())
-        train_ds = ShapeNetCarDataset(args.cache_dir, case_ids=manifest["train_ids"])
-        test_ds = ShapeNetCarDataset(args.cache_dir, case_ids=manifest["test_ids"], stats=train_ds.stats)
+        manifest = json.loads((CACHE_DIR / "manifest.json").read_text())
+        train_ds = ShapeNetCarDataset(CACHE_DIR, case_ids=manifest["train_ids"])
+        test_ds = ShapeNetCarDataset(CACHE_DIR, case_ids=manifest["test_ids"], stats=train_ds.stats)
         loader = torch.utils.data.DataLoader(train_ds, batch_size=4, shuffle=True)
         pos, features, target, mask = next(iter(loader))
         model = Transolver(space_dim=3, in_channels=features.shape[-1], out_channels=target.shape[-1])
@@ -321,8 +307,7 @@ def main():
         print(f"pred {pred.shape}, mse loss {loss.item():.4f}")
         return
 
-    build_cache(args.raw_dir, args.cache_dir, args.mode, args.seed,
-                args.num_points, args.num_surface_points, args.num_exterior_points)
+    build_cache(RAW_DIR, CACHE_DIR, MODE, SEED, NUM_POINTS, NUM_SURFACE_POINTS, NUM_EXTERIOR_POINTS)
 
 
 if __name__ == "__main__":

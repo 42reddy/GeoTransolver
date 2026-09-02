@@ -26,11 +26,11 @@ parameters, printed at startup so you can judge it against your GPU.
 --------------------------------------------------------------------------
 Usage
 --------------------------------------------------------------------------
-    python train.py --cache_dir data/cache --ckpt_dir checkpoints \\
-        --epochs 200 --batch_size 4 --lr 1e-3
+No CLI flags -- edit the PARAMS block below directly, then run this file
+(IDE run button or `python train.py`). Data/checkpoint paths come from
+config.py (edit that file to switch between local and Kaggle).
 """
 
-import argparse
 import json
 import math
 from pathlib import Path
@@ -41,8 +41,36 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 
+from config import CACHE_DIR, CKPT_DIR
 from shapenet_car_dataset import ShapeNetCarDataset
 from transolver import Transolver
+
+
+# ==========================================================================
+# Params -- edit these directly, no CLI flags
+# ==========================================================================
+RESUME = None          # Path to a checkpoint .pt to resume from, or None
+
+# optimization
+EPOCHS = 200
+BATCH_SIZE = 4
+LR = 1e-3
+WEIGHT_DECAY = 1e-4
+WARMUP_FRAC = 0.05
+GRAD_CLIP = 1.0
+VAL_FRACTION = 0.1     # carved out of the train split, not test
+NUM_WORKERS = 2
+AMP = True
+SEED = 0
+
+# model size ("sufficiently large": ~45-50M params at these defaults)
+DIM = 512
+DEPTH = 12
+HEADS = 8
+DIM_HEAD = 64
+NUM_SLICES = 64
+MLP_RATIO = 4.0
+DROPOUT = 0.05
 
 
 # --------------------------------------------------------------------------
@@ -127,61 +155,33 @@ def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, 
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cache_dir", type=Path, default=Path("data/cache"))
-    ap.add_argument("--ckpt_dir", type=Path, default=Path("checkpoints"))
-    ap.add_argument("--resume", type=Path, default=None, help="checkpoint .pt to resume from")
-
-    # optimization
-    ap.add_argument("--epochs", type=int, default=200)
-    ap.add_argument("--batch_size", type=int, default=4)
-    ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--weight_decay", type=float, default=1e-4)
-    ap.add_argument("--warmup_frac", type=float, default=0.05)
-    ap.add_argument("--grad_clip", type=float, default=1.0)
-    ap.add_argument("--val_fraction", type=float, default=0.1, help="carved out of the train split, not test")
-    ap.add_argument("--num_workers", type=int, default=2)
-    ap.add_argument("--amp", action="store_true", default=True)
-    ap.add_argument("--no_amp", dest="amp", action="store_false")
-    ap.add_argument("--seed", type=int, default=0)
-
-    # model size ("sufficiently large": ~45-50M params at these defaults)
-    ap.add_argument("--dim", type=int, default=512)
-    ap.add_argument("--depth", type=int, default=12)
-    ap.add_argument("--heads", type=int, default=8)
-    ap.add_argument("--dim_head", type=int, default=64)
-    ap.add_argument("--num_slices", type=int, default=64)
-    ap.add_argument("--mlp_ratio", type=float, default=4.0)
-    ap.add_argument("--dropout", type=float, default=0.05)
-
-    args = ap.parse_args()
-    torch.manual_seed(args.seed)
-    np.random.seed(args.seed)
+    torch.manual_seed(SEED)
+    np.random.seed(SEED)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    args.ckpt_dir.mkdir(parents=True, exist_ok=True)
+    CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
     # ---------------- data ----------------
-    manifest = json.loads((args.cache_dir / "manifest.json").read_text())
-    rng = np.random.default_rng(args.seed)
+    manifest = json.loads((CACHE_DIR / "manifest.json").read_text())
+    rng = np.random.default_rng(SEED)
     train_ids = list(manifest["train_ids"])
     rng.shuffle(train_ids)
-    n_val = max(1, int(len(train_ids) * args.val_fraction))
+    n_val = max(1, int(len(train_ids) * VAL_FRACTION))
     val_ids, fit_ids = train_ids[:n_val], train_ids[n_val:]
     test_ids = manifest["test_ids"]
 
-    fit_ds = ShapeNetCarDataset(args.cache_dir, case_ids=fit_ids)
-    val_ds = ShapeNetCarDataset(args.cache_dir, case_ids=val_ids, stats=fit_ds.stats)
-    test_ds = ShapeNetCarDataset(args.cache_dir, case_ids=test_ids, stats=fit_ds.stats)
-    np.savez(args.ckpt_dir / "norm_stats.npz", **fit_ds.stats)
+    fit_ds = ShapeNetCarDataset(CACHE_DIR, case_ids=fit_ids)
+    val_ds = ShapeNetCarDataset(CACHE_DIR, case_ids=val_ids, stats=fit_ds.stats)
+    test_ds = ShapeNetCarDataset(CACHE_DIR, case_ids=test_ids, stats=fit_ds.stats)
+    np.savez(CKPT_DIR / "norm_stats.npz", **fit_ds.stats)
     print(f"data: fit={len(fit_ds)} val={len(val_ds)} test={len(test_ds)} mode={manifest['mode']}")
 
-    fit_loader = DataLoader(fit_ds, batch_size=args.batch_size, shuffle=True,
-                             num_workers=args.num_workers, drop_last=True, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False,
-                             num_workers=args.num_workers, pin_memory=True)
-    test_loader = DataLoader(test_ds, batch_size=args.batch_size, shuffle=False,
-                              num_workers=args.num_workers, pin_memory=True)
+    fit_loader = DataLoader(fit_ds, batch_size=BATCH_SIZE, shuffle=True,
+                             num_workers=NUM_WORKERS, drop_last=True, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False,
+                             num_workers=NUM_WORKERS, pin_memory=True)
+    test_loader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False,
+                              num_workers=NUM_WORKERS, pin_memory=True)
 
     # ---------------- model ----------------
     out_channels = manifest["out_channels"]
@@ -189,45 +189,46 @@ def main():
         space_dim=3,
         in_channels=manifest["in_channels"],
         out_channels=out_channels,
-        dim=args.dim,
-        depth=args.depth,
-        heads=args.heads,
-        dim_head=args.dim_head,
-        num_slices=args.num_slices,
-        mlp_ratio=args.mlp_ratio,
-        dropout=args.dropout,
+        dim=DIM,
+        depth=DEPTH,
+        heads=HEADS,
+        dim_head=DIM_HEAD,
+        num_slices=NUM_SLICES,
+        mlp_ratio=MLP_RATIO,
+        dropout=DROPOUT,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"model: dim={args.dim} depth={args.depth} heads={args.heads} "
-          f"dim_head={args.dim_head} num_slices={args.num_slices} -> {n_params / 1e6:.1f}M params")
+    print(f"model: dim={DIM} depth={DEPTH} heads={HEADS} "
+          f"dim_head={DIM_HEAD} num_slices={NUM_SLICES} -> {n_params / 1e6:.1f}M params")
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    total_steps = args.epochs * max(1, len(fit_loader))
-    warmup_steps = int(total_steps * args.warmup_frac)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    total_steps = EPOCHS * max(1, len(fit_loader))
+    warmup_steps = int(total_steps * WARMUP_FRAC)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, make_lr_lambda(total_steps, warmup_steps))
-    scaler = torch.amp.GradScaler("cuda", enabled=(args.amp and device.type == "cuda"))
+    scaler = torch.amp.GradScaler("cuda", enabled=(AMP and device.type == "cuda"))
 
     start_epoch = 0
     best_val = float("inf")
-    if args.resume is not None:
+    if RESUME is not None:
         # weights_only=True (the torch>=2.6 default) can't unpickle the plain
-        # dicts/lists we store (manifest, args); this is our own just-written
-        # checkpoint, not an untrusted download, so full unpickling is safe.
-        ckpt = torch.load(args.resume, map_location=device, weights_only=False)
+        # dicts/lists we store (manifest, params); this is our own just-
+        # written checkpoint, not an untrusted download, so full unpickling
+        # is safe.
+        ckpt = torch.load(RESUME, map_location=device, weights_only=False)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1
         best_val = ckpt["best_val"]
-        tqdm.write(f"resumed from {args.resume} at epoch {start_epoch}, best_val={best_val:.4f}")
+        tqdm.write(f"resumed from {RESUME} at epoch {start_epoch}, best_val={best_val:.4f}")
 
     # ---------------- train ----------------
     bar_fmt = "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}{postfix}]"
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(start_epoch, EPOCHS):
         n_steps = len(fit_loader) + len(val_loader)
         with tqdm(total=n_steps, desc=f"epoch {epoch}", mininterval=1.0, leave=True, bar_format=bar_fmt) as pbar:
             train_loss, train_bd = run_epoch(model, fit_loader, out_channels, device,
-                                              optimizer=optimizer, scaler=scaler, grad_clip=args.grad_clip,
+                                              optimizer=optimizer, scaler=scaler, grad_clip=GRAD_CLIP,
                                               pbar=pbar, phase="train")
             for _ in range(len(fit_loader)):
                 scheduler.step()
@@ -248,15 +249,14 @@ def main():
             "scheduler": scheduler.state_dict(),
             "epoch": epoch,
             "best_val": best_val,
-            "args": {k: (str(v) if isinstance(v, Path) else v) for k, v in vars(args).items()},
             "manifest": manifest,
         }
-        torch.save(ckpt, args.ckpt_dir / "last.pt")
+        torch.save(ckpt, CKPT_DIR / "last.pt")
         if is_best:
-            torch.save(ckpt, args.ckpt_dir / "best.pt")
+            torch.save(ckpt, CKPT_DIR / "best.pt")
 
     # ---------------- final held-out test evaluation ----------------
-    best = torch.load(args.ckpt_dir / "best.pt", map_location=device, weights_only=False)
+    best = torch.load(CKPT_DIR / "best.pt", map_location=device, weights_only=False)
     model.load_state_dict(best["model"])
     with tqdm(total=len(test_loader), desc="test", mininterval=1.0, leave=True, bar_format=bar_fmt) as pbar:
         test_loss, test_bd = run_epoch(model, test_loader, out_channels, device, pbar=pbar, phase="test")

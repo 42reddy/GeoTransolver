@@ -9,16 +9,24 @@ here is the physical geometry/fields, not the per-case-centered/normalized
 tensors the model actually trains on.
 
 Usage:
-    python visualize_sample.py --cache_dir data/cache --case_id param1_abcd1234
-    python visualize_sample.py --cache_dir data/cache            # random case
-    python visualize_sample.py --cache_dir data/cache --save out.png
+No CLI flags -- edit the PARAMS block below directly, then run this file
+(IDE run button or `python visualize_sample.py`). CACHE_DIR comes from
+config.py (edit that file to switch between local and Kaggle).
 """
 
-import argparse
 import json
 from pathlib import Path
 
 import numpy as np
+
+from config import CACHE_DIR
+
+# ==========================================================================
+# Params -- edit these directly, no CLI flags
+# ==========================================================================
+CASE_ID = None    # None -> pick a random case from the manifest (seeded by SEED)
+SEED = 0          # used to pick the random case_id when CASE_ID is None
+SAVE = None       # Path to save the figure to, e.g. Path("sample.png"); None -> show it
 
 
 def plot_sample(pos, features, target, mask, title=""):
@@ -90,26 +98,19 @@ def plot_sample(pos, features, target, mask, title=""):
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--cache_dir", type=Path, default=Path("data/cache"))
-    ap.add_argument("--case_id", type=str, default=None, help="defaults to a random case from the manifest")
-    ap.add_argument("--seed", type=int, default=0, help="used to pick the random case_id when none is given")
-    ap.add_argument("--save", type=Path, default=None, help="save the figure here instead of showing it")
-    args = ap.parse_args()
+    manifest = json.loads((CACHE_DIR / "manifest.json").read_text())
+    case_id = CASE_ID or np.random.default_rng(SEED).choice(manifest["case_ids"])
 
-    manifest = json.loads((args.cache_dir / "manifest.json").read_text())
-    case_id = args.case_id or np.random.default_rng(args.seed).choice(manifest["case_ids"])
-
-    d = np.load(args.cache_dir / f"{case_id}.npz")
+    d = np.load(CACHE_DIR / f"{case_id}.npz")
     pos, features, target, mask = d["pos"], d["features"], d["target"], d["mask"]
     print(f"case {case_id}: {len(pos)} points, features {features.shape}, target {target.shape}, "
           f"{mask.sum()} surface / {(~mask.astype(bool)).sum()} exterior")
 
     fig = plot_sample(pos, features, target, mask, title=f"{case_id}  (mode={manifest['mode']})")
 
-    if args.save:
-        fig.savefig(args.save, dpi=150)
-        print(f"saved to {args.save}")
+    if SAVE:
+        fig.savefig(SAVE, dpi=150)
+        print(f"saved to {SAVE}")
     else:
         import matplotlib.pyplot as plt
         plt.show()
