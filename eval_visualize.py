@@ -105,6 +105,15 @@ def add_panel(plotter, mesh, scalar_name, title, cmap, clim, row, col, bar_title
 def plot_continuous(pos_surf, gt, pred, out_html: Path, out_png: Path, title: str):
     import pyvista as pv
 
+    # Headless containers (Kaggle/Colab) have no display or GPU OpenGL
+    # context, so off_screen=True VTK rendering segfaults the whole
+    # process (kills the kernel with no Python traceback) unless a virtual
+    # framebuffer is started first.
+    try:
+        pv.start_xvfb()
+    except OSError:
+        pass  # xvfb not installed / not needed (e.g. local desktop) -- fall through
+
     press_gt, press_pred = gt["pressure"], pred["pressure"]
     press_err = np.abs(press_pred - press_gt)
     speed_gt, speed_pred = gt["speed"], pred["speed"]
@@ -190,17 +199,23 @@ def main():
         speed_gt = speed_pred = np.zeros_like(press_gt)  # surface-only mode has no velocity target
 
     surf = mask if out_channels == 4 else np.ones(len(pos_raw), dtype=bool)
-    pos_surf = pos_raw[surf]
-    gt = {"pressure": press_gt[surf], "speed": speed_gt[surf]}
-    pred = {"pressure": press_pred[surf], "speed": speed_pred[surf]}
 
-    press_mse = float(np.mean((press_pred[surf] - press_gt[surf]) ** 2))
-    print(f"case {case_id}: {surf.sum()} surface points | pressure MSE (physical units) = {press_mse:.6f}")
+    press_err = press_pred[surf] - press_gt[surf]
+    press_mse = float(np.mean(press_err ** 2))
+    press_mae = float(np.mean(np.abs(press_err)))
 
-    title = f"{case_id}  (epoch {ckpt.get('epoch', '?')}, pressure MSE={press_mse:.4f})"
-    plot_continuous(pos_surf, gt, pred, OUT_HTML, OUT_PNG, title)
-    print(f"saved interactive plot -> {OUT_HTML}")
-    print(f"saved screenshot -> {OUT_PNG}")
+    print(f"case {case_id}  (checkpoint epoch {ckpt.get('epoch', '?')})")
+    print(f"  pressure ({surf.sum()} surface pts): MSE={press_mse:.6f}  MAE={press_mae:.6f}")
+
+    if out_channels == 4:
+        vel_err = vel_pred - vel_gt  # velocity is a valid target everywhere, not just surf
+        vel_mse = float(np.mean(vel_err ** 2))
+        vel_mae = float(np.mean(np.abs(vel_err)))
+        speed_err = speed_pred - speed_gt
+        speed_mse = float(np.mean(speed_err ** 2))
+        speed_mae = float(np.mean(np.abs(speed_err)))
+        print(f"  velocity ({len(pos_raw)} pts, all 3 components): MSE={vel_mse:.6f}  MAE={vel_mae:.6f}")
+        print(f"  |velocity| (speed): MSE={speed_mse:.6f}  MAE={speed_mae:.6f}")
 
 
 if __name__ == "__main__":
