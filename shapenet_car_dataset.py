@@ -60,12 +60,19 @@ def find_cases(raw_dir: Path) -> list[dict]:
 def load_case(case: dict):
     import pyvista as pv
 
+    # quadpress_smpl.vtk loads as an UnstructuredGrid; compute_normals only
+    # exists on PolyData, so convert via extract_surface() first (mirrors
+    # vtkDataSetSurfaceFilter in the official Transolver loader). Since this
+    # file is already an all-surface quad mesh, extract_surface keeps every
+    # point -- pull pos/normals/target from the *same* PolyData afterward so
+    # they stay index-aligned regardless of any reordering the filter does.
     mesh = pv.read(str(case["mesh_path"]))
-    pos = np.asarray(mesh.points, dtype=np.float32)
-    target = np.asarray(mesh.point_data[PRESSURE_FIELD], dtype=np.float32).reshape(-1, 1)
+    surf = mesh.extract_surface(algorithm="dataset_surface")
+    surf = surf.compute_normals(point_normals=True, cell_normals=False, auto_orient_normals=True)
 
-    mesh = mesh.compute_normals(point_normals=True, cell_normals=False, auto_orient_normals=True)
-    normals = np.asarray(mesh.point_data["Normals"], dtype=np.float32)
+    pos = np.asarray(surf.points, dtype=np.float32)
+    normals = np.asarray(surf.point_data["Normals"], dtype=np.float32)
+    target = np.asarray(surf.point_data[PRESSURE_FIELD], dtype=np.float32).reshape(-1, 1)
     return pos, normals, target
 
 
