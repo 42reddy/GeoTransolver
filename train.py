@@ -91,7 +91,11 @@ def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, 
     total_loss, total_items = 0.0, 0
     breakdown_sum = {}
 
-    iterable = tqdm(loader, desc=bar_desc, leave=False) if bar_desc else loader
+    # mininterval throttles how often the bar redraws (default 0.1s refreshes
+    # too fast to render as one coherent bar when stdout is piped, e.g. via
+    # `!python train.py` in Kaggle -- prefer `%run train.py` there instead,
+    # which runs in-process and lets tqdm.auto use the Jupyter widget bar).
+    iterable = tqdm(loader, desc=bar_desc, leave=False, mininterval=1.0) if bar_desc else loader
     for pos, features, target, mask in iterable:
         pos, features, target, mask = (t.to(device, non_blocking=True) for t in (pos, features, target, mask))
 
@@ -119,7 +123,7 @@ def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, 
         for k, v in breakdown.items():
             breakdown_sum[k] = breakdown_sum.get(k, 0.0) + v * bs
         if bar_desc:
-            iterable.set_postfix(loss=f"{loss.item():.4f}")
+            iterable.set_postfix(loss=f"{loss.item():.4f}", refresh=False)
 
     avg = total_loss / total_items
     avg_breakdown = {k: v / total_items for k, v in breakdown_sum.items()}
