@@ -82,21 +82,16 @@ def make_lr_lambda(total_steps: int, warmup_steps: int):
 # Train / eval loops
 # --------------------------------------------------------------------------
 def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, grad_clip=1.0,
-              bar_desc=None):
-    """bar_desc=None runs a plain (silent) pass -- used for val/test, which
-    are short enough not to need their own progress bar. Pass a string to
-    show a live batch-level bar -- used for the training pass."""
+              pbar=None, phase=""):
+    """pbar, if given, is a single tqdm bar (shared across train+val for the
+    epoch) that gets ticked one step per batch -- keeps the whole epoch on
+    one progress line instead of spawning a bar per phase."""
     train = optimizer is not None
     model.train(mode=train)
     total_loss, total_items = 0.0, 0
     breakdown_sum = {}
 
-    # mininterval throttles how often the bar redraws (default 0.1s refreshes
-    # too fast to render as one coherent bar when stdout is piped, e.g. via
-    # `!python train.py` in Kaggle -- prefer `%run train.py` there instead,
-    # which runs in-process and lets tqdm.auto use the Jupyter widget bar).
-    iterable = tqdm(loader, desc=bar_desc, leave=False, mininterval=1.0) if bar_desc else loader
-    for pos, features, target, mask in iterable:
+    for pos, features, target, mask in loader:
         pos, features, target, mask = (t.to(device, non_blocking=True) for t in (pos, features, target, mask))
 
         with torch.set_grad_enabled(train):
@@ -122,8 +117,9 @@ def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, 
         total_items += bs
         for k, v in breakdown.items():
             breakdown_sum[k] = breakdown_sum.get(k, 0.0) + v * bs
-        if bar_desc:
-            iterable.set_postfix(loss=f"{loss.item():.4f}", refresh=False)
+        if pbar is not None:
+            pbar.set_postfix_str(f"{phase} loss={loss.item():.4f}", refresh=False)
+            pbar.update(1)
 
     avg = total_loss / total_items
     avg_breakdown = {k: v / total_items for k, v in breakdown_sum.items()}
@@ -226,20 +222,22 @@ def main():
         tqdm.write(f"resumed from {args.resume} at epoch {start_epoch}, best_val={best_val:.4f}")
 
     # ---------------- train ----------------
-    epoch_bar = tqdm(range(start_epoch, args.epochs), desc="epochs")
-    for epoch in epoch_bar:
-        train_loss, train_bd = run_epoch(model, fit_loader, out_channels, device,
-                                          optimizer=optimizer, scaler=scaler, grad_clip=args.grad_clip,
-                                          bar_desc=f"epoch {epoch} train")
-        for _ in range(len(fit_loader)):
-            scheduler.step()
-        val_loss, val_bd = run_epoch(model, val_loader, out_channels, device)
+    bar_fmt = "{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}{postfix}]"
+    for epoch in range(start_epoch, args.epochs):
+        n_steps = len(fit_loader) + len(val_loader)
+        with tqdm(total=n_steps, desc=f"epoch {epoch}", mininterval=1.0, leave=True, bar_format=bar_fmt) as pbar:
+            train_loss, train_bd = run_epoch(model, fit_loader, out_channels, device,
+                                              optimizer=optimizer, scaler=scaler, grad_clip=args.grad_clip,
+                                              pbar=pbar, phase="train")
+            for _ in range(len(fit_loader)):
+                scheduler.step()
+            val_loss, val_bd = run_epoch(model, val_loader, out_channels, device, pbar=pbar, phase="val")
 
-        is_best = val_loss < best_val
-        best_val = min(best_val, val_loss)
-        lr_now = scheduler.get_last_lr()[0]
-        epoch_bar.set_postfix(lr=f"{lr_now:.1e}", train=f"{train_loss:.4f}", val=f"{val_loss:.4f}",
-                               best="*" if is_best else "")
+            is_best = val_loss < best_val
+            best_val = min(best_val, val_loss)
+            lr_now = scheduler.get_last_lr()[0]
+            pbar.set_postfix(lr=f"{lr_now:.1e}", train=f"{train_loss:.4f}", val=f"{val_loss:.4f}",
+                              best="*" if is_best else "")
         if is_best:
             tqdm.write(f"epoch {epoch}: new best val {val_loss:.4f} "
                        f"(train {train_loss:.4f} {train_bd}, val {val_bd})")
@@ -260,7 +258,8 @@ def main():
     # ---------------- final held-out test evaluation ----------------
     best = torch.load(args.ckpt_dir / "best.pt", map_location=device, weights_only=False)
     model.load_state_dict(best["model"])
-    test_loss, test_bd = run_epoch(model, test_loader, out_channels, device, bar_desc="test")
+    with tqdm(total=len(test_loader), desc="test", mininterval=1.0, leave=True, bar_format=bar_fmt) as pbar:
+        test_loss, test_bd = run_epoch(model, test_loader, out_channels, device, pbar=pbar, phase="test")
     tqdm.write(f"final test (best checkpoint, epoch {best['epoch']}): loss {test_loss:.4f} {test_bd}")
 
 
