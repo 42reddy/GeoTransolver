@@ -134,7 +134,7 @@ def predict_case(model, ds: ShapeNetCarDataset, idx: int, device):
 
 def timed_predict_case(model, ds: ShapeNetCarDataset, idx: int, device):
     """Same as predict_case, but returns (pred_phys, inference_seconds) for
-    just the forward pass -- torch.cuda.synchronize() brackets it so the
+    just the forward pass -- torch.cuda.synchronize() brackets it so
     timing isn't just measuring how fast the GPU queues the kernel."""
     if device.type == "cuda":
         torch.cuda.synchronize()
