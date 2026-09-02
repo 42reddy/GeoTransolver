@@ -52,9 +52,9 @@ from transolver import Transolver
 RESUME = None          # Path to a checkpoint .pt to resume from, or None
 
 # optimization
-EPOCHS = 200
+EPOCHS = 20
 BATCH_SIZE = 4
-LR = 1e-3
+LR = 3e-4
 WEIGHT_DECAY = 1e-4
 WARMUP_FRAC = 0.05
 GRAD_CLIP = 1.0
@@ -63,7 +63,7 @@ NUM_WORKERS = 2
 AMP = True
 SEED = 0
 
-# model size ("sufficiently large": ~45-50M params at these defaults)
+# model
 DIM = 512
 DEPTH = 12
 HEADS = 8
@@ -109,11 +109,15 @@ def make_lr_lambda(total_steps: int, warmup_steps: int):
 # --------------------------------------------------------------------------
 # Train / eval loops
 # --------------------------------------------------------------------------
-def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, grad_clip=1.0,
+def run_epoch(model, loader, out_channels, device, optimizer=None, amp=False, grad_clip=1.0,
               pbar=None, phase=""):
     """pbar, if given, is a single tqdm bar (shared across train+val for the
     epoch) that gets ticked one step per batch -- keeps the whole epoch on
-    one progress line instead of spawning a bar per phase."""
+    one progress line instead of spawning a bar per phase.
+
+    Autocast uses bf16 (not fp16): bf16 has the same exponent range as
+    fp32, so it can't overflow to inf the way fp16 can with a model this
+    size, which removes the need for a GradScaler."""
     train = optimizer is not None
     model.train(mode=train)
     total_loss, total_items = 0.0, 0
@@ -123,22 +127,15 @@ def run_epoch(model, loader, out_channels, device, optimizer=None, scaler=None, 
         pos, features, target, mask = (t.to(device, non_blocking=True) for t in (pos, features, target, mask))
 
         with torch.set_grad_enabled(train):
-            with torch.autocast(device_type=device.type, enabled=(scaler is not None)):
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
                 pred = model(pos, features)
                 loss, breakdown = compute_loss(pred, target, mask, out_channels)
 
         if train:
             optimizer.zero_grad(set_to_none=True)
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                optimizer.step()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
 
         bs = pos.shape[0]
         total_loss += loss.item() * bs
@@ -205,7 +202,7 @@ def main():
     total_steps = EPOCHS * max(1, len(fit_loader))
     warmup_steps = int(total_steps * WARMUP_FRAC)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, make_lr_lambda(total_steps, warmup_steps))
-    scaler = torch.amp.GradScaler("cuda", enabled=(AMP and device.type == "cuda"))
+    amp_enabled = AMP and device.type == "cuda"
 
     start_epoch = 0
     best_val = float("inf")
@@ -228,11 +225,12 @@ def main():
         n_steps = len(fit_loader) + len(val_loader)
         with tqdm(total=n_steps, desc=f"epoch {epoch}", mininterval=1.0, leave=True, bar_format=bar_fmt) as pbar:
             train_loss, train_bd = run_epoch(model, fit_loader, out_channels, device,
-                                              optimizer=optimizer, scaler=scaler, grad_clip=GRAD_CLIP,
+                                              optimizer=optimizer, amp=amp_enabled, grad_clip=GRAD_CLIP,
                                               pbar=pbar, phase="train")
             for _ in range(len(fit_loader)):
                 scheduler.step()
-            val_loss, val_bd = run_epoch(model, val_loader, out_channels, device, pbar=pbar, phase="val")
+            val_loss, val_bd = run_epoch(model, val_loader, out_channels, device, amp=amp_enabled,
+                                          pbar=pbar, phase="val")
 
             is_best = val_loss < best_val
             best_val = min(best_val, val_loss)
@@ -259,7 +257,8 @@ def main():
     best = torch.load(CKPT_DIR / "best.pt", map_location=device, weights_only=False)
     model.load_state_dict(best["model"])
     with tqdm(total=len(test_loader), desc="test", mininterval=1.0, leave=True, bar_format=bar_fmt) as pbar:
-        test_loss, test_bd = run_epoch(model, test_loader, out_channels, device, pbar=pbar, phase="test")
+        test_loss, test_bd = run_epoch(model, test_loader, out_channels, device, amp=amp_enabled,
+                                        pbar=pbar, phase="test")
     tqdm.write(f"final test (best checkpoint, epoch {best['epoch']}): loss {test_loss:.4f} {test_bd}")
 
 
