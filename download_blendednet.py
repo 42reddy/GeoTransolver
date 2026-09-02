@@ -15,6 +15,8 @@ from pathlib import Path
 
 import requests
 
+from config import BLENDEDNET_RAW_DIR
+
 DATAVERSE_FILE_URL = "https://dataverse.harvard.edu/api/access/datafile/{file_id}"
 
 # Dataverse's WAF 403s the default "python-requests/x.y" User-Agent; a
@@ -121,10 +123,13 @@ def extract(raw_dir: Path, dataset: str) -> Path:
 
 
 # ==========================================================================
-# Params -- edit these directly, no CLI flags
+# Params -- edit these directly, no CLI flags. OUT_DIR is derived from
+# BLENDEDNET_RAW_DIR in config.py (extract() writes to OUT_DIR/"extracted",
+# which is where BLENDEDNET_RAW_DIR points) -- edit config.py to switch
+# between local and Kaggle, not this file.
 # ==========================================================================
 DATASET = "blendednet"    # "blendednet" or "blendednet++"
-OUT_DIR = Path("data/raw")
+OUT_DIR = BLENDEDNET_RAW_DIR.parent
 SKIP_EXTRACT = False
 
 
