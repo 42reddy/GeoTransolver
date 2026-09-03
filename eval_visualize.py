@@ -1,5 +1,5 @@
 """
-Evaluate a trained Transolver checkpoint on the held-out test set using the
+Evaluate a trained GeoTransolver checkpoint on the held-out test set using the
 same metric the Transolver paper reports for this exact benchmark (relative
 L2 error per sample, averaged over the test set) -- so the number printed
 here is directly comparable to published results. Also renders one random
@@ -88,8 +88,9 @@ from tqdm.auto import tqdm
 
 from config import CACHE_DIR, CKPT_DIR
 from shapenet_car_dataset import ShapeNetCarDataset
-from transolver import Transolver
-from train import DIM, DEPTH, HEADS, DIM_HEAD, NUM_SLICES, MLP_RATIO, DROPOUT
+from geotransolver import GeoTransolver
+from train import (DIM, DEPTH, HEADS, DIM_HEAD, NUM_SLICES, MLP_RATIO, DROPOUT,
+                    LOCAL_RADII, LOCAL_NEIGHBORS, LOCAL_HIDDEN)
 
 # ==========================================================================
 # Params -- edit these directly, no CLI flags
@@ -126,8 +127,9 @@ def split_fields(target: np.ndarray, pred: np.ndarray, out_channels: int) -> dic
 
 @torch.no_grad()
 def predict_case(model, ds: ShapeNetCarDataset, idx: int, device):
-    pos, features, target, mask = ds[idx]
-    pred_norm = model(pos.unsqueeze(0).to(device), features.unsqueeze(0).to(device))[0].cpu().numpy()
+    pos, geometry, target, mask = ds[idx]
+    field, _ = model(pos.unsqueeze(0).to(device), geometry.unsqueeze(0).to(device))
+    pred_norm = field[0].cpu().numpy()
     pred_phys = pred_norm * ds.stats["target_std"] + ds.stats["target_mean"]
     return pred_phys
 
@@ -329,12 +331,15 @@ def main():
                           f"and is needed to denormalize predictions consistently with training.")
     stats = dict(np.load(stats_path))
 
-    model = Transolver(
+    model = GeoTransolver(
         space_dim=3,
-        in_channels=manifest["in_channels"],
+        geom_dim=manifest["in_channels"],
+        cond_dim=None,
         out_channels=out_channels,
+        num_constants=None,
         dim=DIM, depth=DEPTH, heads=HEADS, dim_head=DIM_HEAD,
         num_slices=NUM_SLICES, mlp_ratio=MLP_RATIO, dropout=DROPOUT,
+        local_radii=LOCAL_RADII, local_neighbors=LOCAL_NEIGHBORS, local_hidden=LOCAL_HIDDEN,
     ).to(device)
     model.load_state_dict(ckpt["model"])
 
