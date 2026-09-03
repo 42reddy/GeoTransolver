@@ -1,12 +1,23 @@
 """
-Train Transolver (transolver.py) to predict the converged CFD field on the
-ShapeNet-Car dataset, using the cache built by shapenet_car_dataset.py.
+Train GeoTransolver (geotransolver/geotransolver.py) to predict the
+converged CFD field on the ShapeNet-Car dataset, using the cache built by
+shapenet_car_dataset.py.
 
 --------------------------------------------------------------------------
 Task recap
 --------------------------------------------------------------------------
+ShapeNet-Car has a single shared inlet flow condition across all cases
+(only geometry varies), so there is no per-case condition vector to feed
+GeoTransolver's global context token: the model is built with
+cond_dim=None (geometry cross-attention context only) and
+num_constants=None (no scalar aerodynamic-coefficient targets, unlike
+BlendedNet's C1/C3/...). The per-point `features` array from
+shapenet_car_dataset.py becomes GeoTransolver's `geometry` stream directly
+(it already *is* a per-point geometric descriptor -- sdf+direction or
+surface normal):
+
 --mode full (default, from shapenet_car_dataset.py --mode full):
-    in_channels=4  [sdf, dir_x, dir_y, dir_z]
+    geom_dim=4  [sdf, dir_x, dir_y, dir_z]
     out_channels=4 [velocity_x, velocity_y, velocity_z, pressure]
     pressure is only a real target at surface points (mask==1); it's
     dummy-zeroed at exterior points, so the loss masks it out there.
@@ -14,9 +25,9 @@ Task recap
     no-slip wall on-surface) so it's never masked.
 
 --mode surface (from shapenet_car_dataset.py --mode surface):
-    in_channels=3 [normal_x, normal_y, normal_z]   (built by the surface-
-    only fallback; note the "4" in-channel default below only applies to
-    full mode -- the manifest tells us the actual dims either way)
+    geom_dim=3 [normal_x, normal_y, normal_z]   (built by the surface-
+    only fallback; note the "4" default below only applies to full mode --
+    the manifest tells us the actual dims either way)
     out_channels=1 [pressure], mask is all-True (plain MSE).
 
 Model size is read from CLI flags with "sufficiently large" defaults
@@ -43,7 +54,7 @@ from tqdm.auto import tqdm
 
 from config import CACHE_DIR, CKPT_DIR
 from shapenet_car_dataset import ShapeNetCarDataset
-from transolver import Transolver
+from geotransolver import GeoTransolver
 
 
 # ==========================================================================
@@ -52,7 +63,7 @@ from transolver import Transolver
 RESUME = None          # Path to a checkpoint .pt to resume from, or None
 
 # optimization
-EPOCHS = 20
+EPOCHS = 25
 BATCH_SIZE = 4
 LR = 3e-4
 WEIGHT_DECAY = 1e-4
@@ -68,9 +79,12 @@ DIM = 512
 DEPTH = 12
 HEADS = 8
 DIM_HEAD = 64
-NUM_SLICES = 64
+NUM_SLICES = 96
 MLP_RATIO = 4.0
 DROPOUT = 0.05
+LOCAL_RADII = (0.05, 0.25)     # ball-query radii, in the same unit-sphere-normalized scale as pos
+LOCAL_NEIGHBORS = (8, 32)      # max neighbors per radius
+LOCAL_HIDDEN = 32              # hidden width of each local ball-query MLP
 
 
 # --------------------------------------------------------------------------
@@ -123,12 +137,12 @@ def run_epoch(model, loader, out_channels, device, optimizer=None, amp=False, gr
     total_loss, total_items = 0.0, 0
     breakdown_sum = {}
 
-    for pos, features, target, mask in loader:
-        pos, features, target, mask = (t.to(device, non_blocking=True) for t in (pos, features, target, mask))
+    for pos, geometry, target, mask in loader:
+        pos, geometry, target, mask = (t.to(device, non_blocking=True) for t in (pos, geometry, target, mask))
 
         with torch.set_grad_enabled(train):
             with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
-                pred = model(pos, features)
+                pred, _ = model(pos, geometry)
                 loss, breakdown = compute_loss(pred, target, mask, out_channels)
 
         if train:
@@ -182,10 +196,12 @@ def main():
 
     # ---------------- model ----------------
     out_channels = manifest["out_channels"]
-    model = Transolver(
+    model = GeoTransolver(
         space_dim=3,
-        in_channels=manifest["in_channels"],
+        geom_dim=manifest["in_channels"],
+        cond_dim=None,          # ShapeNet-Car: single shared inlet condition, nothing to condition on
         out_channels=out_channels,
+        num_constants=None,     # no per-case scalar targets on this dataset
         dim=DIM,
         depth=DEPTH,
         heads=HEADS,
@@ -193,6 +209,9 @@ def main():
         num_slices=NUM_SLICES,
         mlp_ratio=MLP_RATIO,
         dropout=DROPOUT,
+        local_radii=LOCAL_RADII,
+        local_neighbors=LOCAL_NEIGHBORS,
+        local_hidden=LOCAL_HIDDEN,
     ).to(device)
     n_params = sum(p.numel() for p in model.parameters())
     print(f"model: dim={DIM} depth={DEPTH} heads={HEADS} "

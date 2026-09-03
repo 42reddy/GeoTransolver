@@ -10,6 +10,7 @@ file (IDE run button or `python download_blendednet.py`). Set DATASET to
 
 import shutil
 import subprocess
+import time
 import zipfile
 from pathlib import Path
 
@@ -53,44 +54,72 @@ DATASETS = {
 }
 
 
-def download_file(file_id: int, dest: Path, chunk_size: int = 1 << 20) -> None:
+def download_file(
+    file_id: int, dest: Path, chunk_size: int = 1 << 20, max_retries: int = 8
+) -> None:
     if dest.exists():
         print(f"  [skip] {dest.name} already exists")
         return
     tmp = dest.with_suffix(dest.suffix + ".part")
     url = DATAVERSE_FILE_URL.format(file_id=file_id)
 
-    # Resume a previous partial download via Range, if the server supports it.
-    resume_from = tmp.stat().st_size if tmp.exists() else 0
-    headers = dict(REQUEST_HEADERS)
-    if resume_from:
-        headers["Range"] = f"bytes={resume_from}-"
+    # Large Dataverse/S3 files routinely trip a read timeout mid-stream even
+    # on a healthy connection. Retry the request, resuming via Range from
+    # however much of tmp is already on disk, instead of failing outright.
+    for attempt in range(1, max_retries + 1):
+        resume_from = tmp.stat().st_size if tmp.exists() else 0
+        headers = dict(REQUEST_HEADERS)
+        if resume_from:
+            headers["Range"] = f"bytes={resume_from}-"
 
-    with requests.get(url, stream=True, timeout=60, headers=headers) as r:
-        if resume_from and r.status_code == 200:
-            # server ignored Range and is sending the whole file again
-            resume_from = 0
-        r.raise_for_status()
-        content_length = int(r.headers.get("content-length", 0))
-        total = content_length + resume_from if r.status_code == 206 else content_length
-        done = resume_from
-        mode = "ab" if r.status_code == 206 else "wb"
-        with open(tmp, mode) as f:
-            for chunk in r.iter_content(chunk_size=chunk_size):
-                f.write(chunk)
-                done += len(chunk)
-                if total:
-                    print(f"\r  [{dest.name}] {done / total:.1%}", end="", flush=True)
-    print()
+        try:
+            with requests.get(url, stream=True, timeout=60, headers=headers) as r:
+                if resume_from and r.status_code == 200:
+                    # server ignored Range and is sending the whole file again
+                    resume_from = 0
+                r.raise_for_status()
+                content_length = int(r.headers.get("content-length", 0))
+                total = (
+                    content_length + resume_from
+                    if r.status_code == 206
+                    else content_length
+                )
+                done = resume_from
+                mode = "ab" if r.status_code == 206 else "wb"
+                with open(tmp, mode) as f:
+                    for chunk in r.iter_content(chunk_size=chunk_size):
+                        f.write(chunk)
+                        done += len(chunk)
+                        if total:
+                            print(
+                                f"\r  [{dest.name}] {done / total:.1%}",
+                                end="",
+                                flush=True,
+                            )
+            print()
+        except requests.exceptions.RequestException as e:
+            if attempt == max_retries:
+                raise
+            wait = min(2**attempt, 60)
+            print(
+                f"\n  [{dest.name}] attempt {attempt}/{max_retries} failed "
+                f"({e!r}); retrying in {wait}s, resuming from "
+                f"{tmp.stat().st_size if tmp.exists() else 0} bytes..."
+            )
+            time.sleep(wait)
+            continue
 
-    final_size = tmp.stat().st_size
-    if total and final_size != total:
-        raise IOError(
-            f"{dest.name}: incomplete download ({final_size} of {total} bytes). "
-            f"This is usually the disk filling up mid-write -- check `df -h` on the "
-            f"target volume, free up space, then rerun (it will resume from {final_size} bytes)."
-        )
-    tmp.rename(dest)
+        final_size = tmp.stat().st_size
+        if total and final_size != total:
+            raise IOError(
+                f"{dest.name}: incomplete download ({final_size} of {total} bytes). "
+                f"This is usually the disk filling up mid-write -- check `df -h` on the "
+                f"target volume, free up space, then rerun (it will resume from {final_size} bytes)."
+            )
+        tmp.rename(dest)
+        return
+
+    raise IOError(f"{dest.name}: exhausted {max_retries} retries")
 
 
 def extract(raw_dir: Path, dataset: str) -> Path:

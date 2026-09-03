@@ -231,7 +231,11 @@ def compute_case_aero(pos: np.ndarray, features: np.ndarray, target: np.ndarray,
     normals, areas = mesh.cell_data["Normals"], mesh.cell_data["Area"]
     q = 0.5 * v_inf ** 2
 
-    out = {"v_inf": v_inf, "A_ref": A_ref}
+    out = {
+        "v_inf": v_inf, "A_ref": A_ref,
+        "drag_dir": drag_dir, "vertical_dir": vertical_dir, "lateral_dir": lateral_dir,
+        "center": pos_surf.mean(0),
+    }
     for name in ("press_gt", "press_pred"):
         face_press = mesh.point_data[name][faces].mean(axis=1)
         force = -(face_press[:, None] * areas[:, None] * normals).sum(axis=0)
