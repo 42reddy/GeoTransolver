@@ -64,7 +64,7 @@ RESUME = None          # Path to a checkpoint .pt to resume from, or None
 
 # optimization
 EPOCHS = 25
-BATCH_SIZE = 4
+BATCH_SIZE = 6
 LR = 3e-4
 WEIGHT_DECAY = 1e-4
 WARMUP_FRAC = 0.05
