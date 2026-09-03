@@ -144,7 +144,7 @@ class GeoTransolverBlock(nn.Module):
         self.ln_1 = nn.LayerNorm(dim)
         self.attn = GeoPhysicsAttention(dim, heads, dim_head, dropout, slice_num)
         self.ln_2 = nn.LayerNorm(dim)
-        self.mlp = MLP(dim, dim * mlp_ratio, dim, n_layers=0, res=False, act=act)
+        self.mlp = MLP(dim, int(dim * mlp_ratio), dim, n_layers=0, res=False, act=act)
 
     def forward(self, fx, context):
         fx = self.attn(self.ln_1(fx), context) + fx
