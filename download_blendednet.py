@@ -162,7 +162,7 @@ def sanity_check_zip(zip_path: Path) -> None:
 # skipped instead of aborting everything. Run this script, then run
 # blendednet_dataset.py.
 # ==========================================================================
-DATASET = "blendednet++"    # "blendednet" or "blendednet++"
+DATASET = "blendednet"    # "blendednet" or "blendednet++"
 OUT_DIR = BLENDEDNET_RAW_DIR
 
 
