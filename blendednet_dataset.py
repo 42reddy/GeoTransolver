@@ -115,10 +115,6 @@ def find_archive(raw_dir: Path, dataset: str = "blendednet") -> Path:
     return path
 
 
-def _case_dir(member_name: str) -> str:
-    return str(Path(member_name).parent)
-
-
 def _is_mesh(name: str) -> bool:
     return Path(name).suffix.lower() in SURFACE_EXTS
 
@@ -128,19 +124,21 @@ def _is_meta(name: str) -> bool:
 
 
 def _group_cases(names):
-    """Pair each mesh file with a metadata file sharing its directory."""
-    by_dir = {}
+    """One case per mesh file (this archive stores all meshes together in a
+    shared folder, e.g. train/vtk/case_0001.vtk -- NOT one subfolder per
+    case), paired with a metadata file of the same stem regardless of which
+    folder it lives in (e.g. train/meta/case_0001.json)."""
+    names = list(names)
+    meta_by_stem = {}
     for n in names:
-        if n.endswith("/"):
-            continue
-        by_dir.setdefault(_case_dir(n), []).append(n)
+        if not n.endswith("/") and _is_meta(n):
+            meta_by_stem.setdefault(Path(n).stem, n)
     cases = []
-    for d, members in by_dir.items():
-        mesh = next((m for m in members if _is_mesh(m)), None)
-        if mesh is None:
+    for n in names:
+        if n.endswith("/") or not _is_mesh(n):
             continue
-        meta = next((m for m in members if _is_meta(m)), None)
-        cases.append({"case_id": Path(mesh).stem, "mesh": mesh, "meta": meta})
+        stem = Path(n).stem
+        cases.append({"case_id": stem, "mesh": n, "meta": meta_by_stem.get(stem)})
     return cases
 
 
@@ -326,58 +324,64 @@ def _build_cache_zip(archive: Path, cache_dir: Path, num_points, seed,
 
 def _build_cache_targz(archive: Path, cache_dir: Path, num_points, seed,
                         global_feat_keys, const_keys, fields):
-    """Single sequential pass over the tar.gz (gzip streams can't be seeked
-    to an arbitrary member cheaply). Cases are assumed to be stored as
-    contiguous per-case directories, so a case is finalized -- processed and
-    its raw files deleted -- as soon as the stream moves to the next
-    directory."""
+    """gzip streams can't be seeked to an arbitrary member cheaply, and
+    mesh/metadata files for the same case aren't necessarily adjacent in the
+    archive (they're paired by filename stem, not folder -- see
+    _group_cases), so this makes two sequential passes instead of one:
+
+      pass 1: read every (small) metadata file fully into memory, keyed by
+              stem -- cheap, these are tiny compared to the meshes.
+      pass 2: stream through again, and for each (large) mesh file, write
+              it to a scratch dir, pair it with the matching in-memory
+              metadata, process into the cache, delete the scratch file.
+              Only ever holds one mesh on disk at a time.
+    """
     rng = np.random.default_rng(seed)
     manifest = []
     tracker = _ConsecutiveFailureTracker()
+
+    meta_by_stem = {}  # stem -> (suffix, bytes)
+    with tarfile.open(archive, mode="r|gz") as tf:
+        for member in tf:
+            if member.isfile() and _is_meta(member.name):
+                with tf.extractfile(member) as src:
+                    meta_by_stem.setdefault(Path(member.name).stem,
+                                             (Path(member.name).suffix, src.read()))
+
     tmp_root = Path(tempfile.mkdtemp(prefix="blendednet_targz_"))
-    pending = {}
     i = 0
-
-    def flush(case_dir):
-        nonlocal global_feat_keys, const_keys, i
-        info = pending.pop(case_dir)
-        raw_dir = tmp_root / case_dir
-        if info["mesh"] is not None:
-            case_id = info["mesh"].stem
-            try:
-                field_names, gkeys, ckeys = _process_one_case(
-                    case_id, info["mesh"], info["meta"], global_feat_keys, const_keys,
-                    fields, num_points, rng, cache_dir)
-                manifest.append(case_id)
-                global_feat_keys, const_keys = gkeys, ckeys
-                tracker.ok()
-                if i % 50 == 0:
-                    print(f"  [{i}] {case_id}: fields={field_names} "
-                          f"condition={gkeys} constants={ckeys}")
-                i += 1
-            except Exception as e:
-                tracker.failed(case_id, e)
-        shutil.rmtree(raw_dir, ignore_errors=True)
-
     try:
         with tarfile.open(archive, mode="r|gz") as tf:
-            last_dir = None
             for member in tf:
-                if not member.isfile():
+                if not (member.isfile() and _is_mesh(member.name)):
                     continue
-                d = _case_dir(member.name)
-                if last_dir is not None and d != last_dir and last_dir in pending:
-                    flush(last_dir)
-                if _is_mesh(member.name) or _is_meta(member.name):
-                    out_path = tmp_root / member.name
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    with tf.extractfile(member) as src, open(out_path, "wb") as dst:
+                case_id = Path(member.name).stem
+                mesh_path = tmp_root / Path(member.name).name
+                meta_path = None
+                meta_entry = meta_by_stem.get(case_id)
+                try:
+                    with tf.extractfile(member) as src, open(mesh_path, "wb") as dst:
                         shutil.copyfileobj(src, dst)
-                    slot = "mesh" if _is_mesh(member.name) else "meta"
-                    pending.setdefault(d, {"mesh": None, "meta": None})[slot] = out_path
-                last_dir = d
-            if last_dir in pending:
-                flush(last_dir)
+                    if meta_entry is not None:
+                        meta_suffix, meta_bytes = meta_entry
+                        meta_path = tmp_root / f"{case_id}_meta{meta_suffix}"
+                        meta_path.write_bytes(meta_bytes)
+                    field_names, gkeys, ckeys = _process_one_case(
+                        case_id, mesh_path, meta_path, global_feat_keys, const_keys,
+                        fields, num_points, rng, cache_dir)
+                    manifest.append(case_id)
+                    global_feat_keys, const_keys = gkeys, ckeys
+                    tracker.ok()
+                    if i % 50 == 0:
+                        print(f"  [{i}] {case_id}: fields={field_names} "
+                              f"condition={gkeys} constants={ckeys}")
+                    i += 1
+                except Exception as e:
+                    tracker.failed(case_id, e)
+                finally:
+                    mesh_path.unlink(missing_ok=True)
+                    if meta_path is not None:
+                        meta_path.unlink(missing_ok=True)
     finally:
         shutil.rmtree(tmp_root, ignore_errors=True)
     print(f"{tracker.total_failed} case(s) skipped as corrupt/unparseable")
