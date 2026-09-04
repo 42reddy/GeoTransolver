@@ -59,7 +59,7 @@ RESUME = None          # Path to a checkpoint .pt to resume from, or None
 
 # optimization
 EPOCHS = 25
-BATCH_SIZE = 8
+BATCH_SIZE = 32
 LR = 3e-4
 WEIGHT_DECAY = 1e-4
 WARMUP_FRAC = 0.05
@@ -72,11 +72,11 @@ SEED = 0
 CONST_LOSS_WEIGHT = 1.0  # only used when the cache has constant targets
 
 # model
-DIM = 512
-DEPTH = 12
-HEADS = 8
-DIM_HEAD = 64
-NUM_SLICES = 96
+DIM = 128
+DEPTH = 8
+HEADS = 4
+DIM_HEAD = 32
+NUM_SLICES = 32
 MLP_RATIO = 4.0
 DROPOUT = 0.05
 LOCAL_RADII = (0.05, 0.25)
