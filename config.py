@@ -34,5 +34,7 @@ CKPT_DIR = Path("checkpoints")                                # training checkpo
 # extracts to disk; blendednet_dataset.py streams cases straight out of the
 # zip/tar.gz one at a time so the full unpacked dataset never has to fit
 # alongside the archive and the cache.
-BLENDEDNET_RAW_DIR = Path("/data/raw")
-BLENDEDNET_CACHE_DIR = Path("/data/cache_blendednet")
+BLENDEDNET_RAW_DIR = Path("data/blendednet_raw")
+BLENDEDNET_CACHE_ARCHIVE = BLENDEDNET_RAW_DIR / "blendednet_cache.tar.gz"  # packed cache from blendednet_dataset.py
+BLENDEDNET_CACHE_DIR = Path("/kaggle/input/datasets/reddy42/blendednet-data/cache_blendednet")                      # extracted .npz + manifest.json
+BLENDEDNET_CKPT_DIR = Path("checkpoints_blendednet")
