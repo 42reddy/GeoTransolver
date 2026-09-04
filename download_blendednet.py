@@ -9,7 +9,6 @@ file (IDE run button or `python download_blendednet.py`). Set DATASET to
 """
 
 import shutil
-import subprocess
 import time
 import zipfile
 from pathlib import Path
@@ -122,44 +121,49 @@ def download_file(
     raise IOError(f"{dest.name}: exhausted {max_retries} retries")
 
 
-def extract(raw_dir: Path, dataset: str) -> Path:
-    out_dir = raw_dir / "extracted"
-    out_dir.mkdir(exist_ok=True)
-    if dataset == "blendednet":
-        zip_path = raw_dir / "BlendedNet_Dataset_Released.zip"
-        with zipfile.ZipFile(zip_path) as zf:
-            bad = zf.testzip()
-            if bad is not None:
-                zip_path.unlink()
-                raise IOError(
-                    f"{zip_path.name} is corrupt (bad CRC on {bad!r}) and has been "
-                    f"deleted -- this means the download completed but the bytes on "
-                    f"disk don't match (usually the disk filled up mid-write). Check "
-                    f"`df -h` on the target volume, free up space, then rerun the "
-                    f"download from scratch."
-                )
-        shutil.unpack_archive(str(zip_path), str(out_dir))
-    else:
-        parts = sorted(raw_dir.glob("blendednet++_dataset.tar.gz.part-*"))
-        combined = raw_dir / "blendednet++_dataset.tar.gz"
-        if not combined.exists():
-            with open(combined, "wb") as out:
-                for p in parts:
-                    with open(p, "rb") as f:
-                        shutil.copyfileobj(f, out)
-        subprocess.run(["tar", "-xzf", str(combined), "-C", str(out_dir)], check=True)
-    return out_dir
+def combine_parts(raw_dir: Path) -> Path:
+    """Concatenate blendednet++'s .part- files into one tar.gz, deleting each
+    part as soon as it's been appended -- avoids briefly needing 2x the
+    space (all parts + the combined file) on disk at once."""
+    combined = raw_dir / "blendednet++_dataset.tar.gz"
+    if combined.exists():
+        return combined
+    parts = sorted(raw_dir.glob("blendednet++_dataset.tar.gz.part-*"))
+    tmp = combined.with_suffix(combined.suffix + ".part")
+    with open(tmp, "wb") as out:
+        for p in parts:
+            with open(p, "rb") as f:
+                shutil.copyfileobj(f, out)
+            p.unlink()
+    tmp.rename(combined)
+    return combined
+
+
+def sanity_check_zip(zip_path: Path) -> None:
+    """Just confirms the central directory is intact (catches a truncated/
+    mid-write file). Deliberately does NOT check every member's CRC --
+    individual corrupt cases (a known issue with this archive) are skipped
+    per-case during processing in blendednet_dataset.py instead of aborting
+    the whole download."""
+    with zipfile.ZipFile(zip_path) as zf:
+        zf.namelist()
 
 
 # ==========================================================================
-# Params -- edit these directly, no CLI flags. OUT_DIR is derived from
-# BLENDEDNET_RAW_DIR in config.py (extract() writes to OUT_DIR/"extracted",
-# which is where BLENDEDNET_RAW_DIR points) -- edit config.py to switch
-# between local and Kaggle, not this file.
+# Params -- edit these directly, no CLI flags. OUT_DIR comes from
+# BLENDEDNET_RAW_DIR in config.py -- edit config.py to switch between local
+# and Kaggle, not this file.
+#
+# This script only downloads the archive(s) -- it does NOT extract them to
+# disk. blendednet_dataset.py streams cases straight out of the archive
+# (one case at a time: extract -> process into the cache -> delete the raw
+# case files) so the full unpacked dataset never has to fit on disk at
+# once, and a corrupt individual case (this archive has a few) just gets
+# skipped instead of aborting everything. Run this script, then run
+# blendednet_dataset.py.
 # ==========================================================================
 DATASET = "blendednet"    # "blendednet" or "blendednet++"
-OUT_DIR = BLENDEDNET_RAW_DIR.parent
-SKIP_EXTRACT = False
+OUT_DIR = BLENDEDNET_RAW_DIR
 
 
 def main():
@@ -169,11 +173,13 @@ def main():
     for file_id, name in spec["files"]:
         download_file(file_id, OUT_DIR / name)
 
-    if not SKIP_EXTRACT:
-        print("Extracting...")
-        out_dir = extract(OUT_DIR, DATASET)
-        print(f"Extracted to {out_dir}")
-    print("Done.")
+    if DATASET == "blendednet":
+        sanity_check_zip(OUT_DIR / "BlendedNet_Dataset_Released.zip")
+    else:
+        print("Combining parts...")
+        combined = combine_parts(OUT_DIR)
+        print(f"Combined -> {combined}")
+    print("Done. Run blendednet_dataset.py to build the cache.")
 
 
 if __name__ == "__main__":

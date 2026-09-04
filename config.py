@@ -16,13 +16,12 @@ Kaggle (BlendedNet, download + build in-notebook): BLENDEDNET_RAW_DIR and
 BLENDEDNET_CACHE_DIR below already point under /kaggle/working/ (the only
 writable disk in a Kaggle notebook -- /kaggle/input is read-only), so
 download_blendednet.py and blendednet_dataset.py run as-is: run
-download_blendednet.py first to fetch + extract into BLENDEDNET_RAW_DIR,
-then blendednet_dataset.py to build BLENDEDNET_CACHE_DIR from it. Note
-/kaggle/working has a ~20GB output quota -- the raw BlendedNet archive
-(25-60GB) may not fit alongside its extracted copy and the cache; delete
-the downloaded archive/parts after extraction if you hit the quota, or
-set SKIP_EXTRACT/point OUT_DIR at Kaggle's larger temp scratch space if
-available.
+download_blendednet.py first to fetch the archive into BLENDEDNET_RAW_DIR,
+then blendednet_dataset.py to stream cases out of it (one at a time,
+deleting each case's raw files as it's cached, then deleting the archive
+once done) into BLENDEDNET_CACHE_DIR. Note /kaggle/working has a ~20GB
+output quota -- the raw BlendedNet archive alone (25-60GB) may still not
+fit; point OUT_DIR at Kaggle's larger temp scratch space if available.
 """
 
 from pathlib import Path
@@ -31,5 +30,9 @@ RAW_DIR = Path("data/raw/extracted/training_data")           # shapenet_car_data
 CACHE_DIR = Path("/kaggle/input/datasets/reddy42/shape-net/cache")                                # cached .npz + manifest.json
 CKPT_DIR = Path("checkpoints")                                # training checkpoints
 
-BLENDEDNET_RAW_DIR = Path("/data/raw/extracted")
+# Holds the downloaded archive(s) only -- download_blendednet.py no longer
+# extracts to disk; blendednet_dataset.py streams cases straight out of the
+# zip/tar.gz one at a time so the full unpacked dataset never has to fit
+# alongside the archive and the cache.
+BLENDEDNET_RAW_DIR = Path("/data/raw")
 BLENDEDNET_CACHE_DIR = Path("/data/cache_blendednet")
