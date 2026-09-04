@@ -6,6 +6,7 @@ training -- this app always runs locally and must not be exposed to that.
 module of the same name when both end up on sys.path -- see build_assets.py.)
 """
 
+import os
 from pathlib import Path
 
 APP_DIR = Path(__file__).resolve().parent
@@ -17,3 +18,21 @@ MANIFEST_PATH = ASSETS_DIR / "manifest.json"
 # data_prep only -- app.py never touches these, it only reads ASSETS_DIR.
 LOCAL_CACHE_DIR = REPO_ROOT / "data" / "cache"   # cached .npz + manifest.json (shapenet_car_dataset.py)
 LOCAL_CKPT_DIR = REPO_ROOT / "checkpoints"       # best.pt / last.pt / norm_stats.npz (train.py)
+
+# Checkpoint weights, and the per-case .npz cache files the gallery reads
+# ground truth from, aren't committed to this repo -- HF's git backend
+# rejects raw binary blobs above a few hundred KB unless routed through
+# LFS/Xet, so app.py downloads both from HF repo(s) on first run instead.
+# Set these as Space "Variables and secrets" (Settings tab), not here:
+#   HF_CKPT_REPO_ID    e.g. "your-username/geotransolver-shapenetcar" (required)
+#   HF_CKPT_REPO_TYPE  "model" or "dataset" -- whichever kind of repo that is
+#   HF_DATA_REPO_ID    holds the 12 gallery cases' .npz files; defaults to
+#                       HF_CKPT_REPO_ID (upload everything there, no second
+#                       repo needed) unless set separately
+#   HF_DATA_REPO_TYPE  "model" or "dataset" for HF_DATA_REPO_ID
+#   HF_TOKEN           only needed if those repos are private
+HF_CKPT_REPO_ID = os.environ.get("HF_CKPT_REPO_ID")
+HF_CKPT_REPO_TYPE = os.environ.get("HF_CKPT_REPO_TYPE", "model")
+HF_DATA_REPO_ID = os.environ.get("HF_DATA_REPO_ID", HF_CKPT_REPO_ID)
+HF_DATA_REPO_TYPE = os.environ.get("HF_DATA_REPO_TYPE", HF_CKPT_REPO_TYPE if HF_DATA_REPO_ID == HF_CKPT_REPO_ID else "dataset")
+HF_TOKEN = os.environ.get("HF_TOKEN")

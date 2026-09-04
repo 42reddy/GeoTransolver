@@ -2,3 +2,9 @@ gradio
 torch
 numpy
 scipy
+matplotlib
+pyvista
+einops
+timm
+tqdm
+huggingface_hub

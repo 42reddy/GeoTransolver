@@ -1,6 +1,6 @@
 """
 Product app: pick one of a fixed set of ShapeNet-Car geometries and see the
-Transolver-inferred CFD flow field, alongside aerodynamic metrics.
+GeoTransolver-inferred CFD flow field, alongside aerodynamic metrics.
 
 Inference is lazy: the sidebar gallery is populated from thumbnails built
 offline (data_prep/build_geometry.py, no model involved), and the trained
@@ -37,18 +37,28 @@ REPO_ROOT = WEBAPP_DIR.parent
 sys.path.insert(0, str(REPO_ROOT))
 sys.path.insert(0, str(WEBAPP_DIR))
 
-from settings import ASSETS_DIR, MANIFEST_PATH, LOCAL_CACHE_DIR, LOCAL_CKPT_DIR  # noqa: E402
+from settings import (  # noqa: E402
+    ASSETS_DIR, MANIFEST_PATH, LOCAL_CACHE_DIR, LOCAL_CKPT_DIR,
+    HF_CKPT_REPO_ID, HF_CKPT_REPO_TYPE, HF_DATA_REPO_ID, HF_DATA_REPO_TYPE, HF_TOKEN,
+)
 from shapenet_car_dataset import ShapeNetCarDataset  # noqa: E402
-from transolver import Transolver  # noqa: E402
+from geotransolver import GeoTransolver  # noqa: E402
 from eval_visualize import (  # noqa: E402
     build_colored_surface, compute_case_aero, predict_case, relative_l2, timed_predict_case,
+)
+# Model hyperparameters live in train.py (single source of truth) so the
+# architecture built here always matches whatever checkpoint train.py last
+# produced -- a hardcoded second copy here is exactly how DIM/DEPTH/etc.
+# would silently drift from the weights and break state_dict loading.
+from train import (  # noqa: E402
+    DIM, DEPTH, HEADS, DIM_HEAD, NUM_SLICES, MLP_RATIO, DROPOUT,
+    LOCAL_RADII, LOCAL_NEIGHBORS, LOCAL_HIDDEN,
 )
 
 # ==========================================================================
 # Params
 # ==========================================================================
-CKPT_NAME = "best.pt"  # falls back to "last.pt" if best.pt isn't there
-DIM, DEPTH, HEADS, DIM_HEAD, NUM_SLICES, MLP_RATIO, DROPOUT = 512, 12, 8, 64, 64, 4.0, 0.05
+CKPT_NAME = "GeoTransolver_Shapenetcar.pt"  # falls back to "last.pt" if best.pt isn't there
 
 PRESSURE_CMAP, VELOCITY_CMAP, ERROR_CMAP = "coolwarm", "viridis", "inferno"
 BODY_COLOR_U8 = np.array([120, 120, 130, 255], dtype=np.uint8)
@@ -115,19 +125,30 @@ def pick_device() -> torch.device:
     return torch.device("cpu")
 
 
-def load_model(device: torch.device, manifest: dict) -> Transolver:
+def load_model(device: torch.device, manifest: dict) -> GeoTransolver:
     ckpt_path = LOCAL_CKPT_DIR / CKPT_NAME
     if not ckpt_path.exists():
         ckpt_path = LOCAL_CKPT_DIR / "last.pt"
     if not ckpt_path.exists():
-        raise SystemExit(
-            f"No checkpoint found in {LOCAL_CKPT_DIR} (looked for {CKPT_NAME} and last.pt). "
-            f"Drop your trained best.pt/last.pt in there and restart the app."
-        )
-    model = Transolver(
-        space_dim=3, in_channels=manifest["in_channels"], out_channels=manifest["out_channels"],
+        if not HF_CKPT_REPO_ID:
+            raise SystemExit(
+                f"No checkpoint found in {LOCAL_CKPT_DIR} (looked for {CKPT_NAME} and last.pt), and "
+                f"HF_CKPT_REPO_ID isn't set to download one. Either drop a checkpoint in {LOCAL_CKPT_DIR}, "
+                f"or set HF_CKPT_REPO_ID (Space Settings -> Variables and secrets) to the HF model repo "
+                f"holding {CKPT_NAME}."
+            )
+        from huggingface_hub import hf_hub_download
+        print(f"no local checkpoint -- downloading hf://{HF_CKPT_REPO_ID}/{CKPT_NAME} ...")
+        ckpt_path = Path(hf_hub_download(
+            repo_id=HF_CKPT_REPO_ID, repo_type=HF_CKPT_REPO_TYPE, filename=CKPT_NAME,
+            local_dir=LOCAL_CKPT_DIR, token=HF_TOKEN,
+        ))
+    model = GeoTransolver(
+        space_dim=3, geom_dim=manifest["in_channels"], cond_dim=None,
+        out_channels=manifest["out_channels"], num_constants=None,
         dim=DIM, depth=DEPTH, heads=HEADS, dim_head=DIM_HEAD,
         num_slices=NUM_SLICES, mlp_ratio=MLP_RATIO, dropout=DROPOUT,
+        local_radii=LOCAL_RADII, local_neighbors=LOCAL_NEIGHBORS, local_hidden=LOCAL_HIDDEN,
     ).to(device)
     ckpt = torch.load(ckpt_path, map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model"])
@@ -144,10 +165,32 @@ def load_manifest() -> list[dict]:
     return json.loads(MANIFEST_PATH.read_text())["cases"]
 
 
+def ensure_case_cache(case_ids: list[str]):
+    """Download any of the gallery's per-case .npz files (ground-truth pos/
+    features/target/mask) not already sitting in LOCAL_CACHE_DIR -- these
+    aren't committed to the repo (see settings.py), so on a fresh Space
+    checkout every one of them is missing on first launch."""
+    missing = [cid for cid in case_ids if not (LOCAL_CACHE_DIR / f"{cid}.npz").exists()]
+    if not missing:
+        return
+    if not HF_DATA_REPO_ID:
+        raise SystemExit(
+            f"{len(missing)} case .npz file(s) missing from {LOCAL_CACHE_DIR}, and HF_DATA_REPO_ID isn't "
+            f"set to download them. Either populate {LOCAL_CACHE_DIR} directly, or set HF_DATA_REPO_ID "
+            f"(Space Settings -> Variables and secrets) to the HF repo holding them."
+        )
+    from huggingface_hub import hf_hub_download
+    print(f"downloading {len(missing)} case file(s) from hf://{HF_DATA_REPO_ID} ...")
+    for cid in missing:
+        hf_hub_download(repo_id=HF_DATA_REPO_ID, repo_type=HF_DATA_REPO_TYPE, filename=f"{cid}.npz",
+                         local_dir=LOCAL_CACHE_DIR, token=HF_TOKEN)
+
+
 CASES = load_manifest()
 GALLERY_ITEMS = [(str(ASSETS_DIR / c["thumbnail"]), c["display_name"]) for c in CASES]
 
 DEVICE = pick_device()
+ensure_case_cache([c["case_id"] for c in CASES])
 DATA_MANIFEST = json.loads((LOCAL_CACHE_DIR / "manifest.json").read_text())
 NORM_STATS = dict(np.load(LOCAL_CKPT_DIR / "norm_stats.npz"))
 MODEL = load_model(DEVICE, DATA_MANIFEST)
