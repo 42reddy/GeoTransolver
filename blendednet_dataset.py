@@ -218,7 +218,7 @@ def load_case(case: dict, global_feat_keys: list[str] | None, const_keys: list[s
     if const_keys is None:
         const_keys = sorted(const_meta.keys())
     condition = np.array([condition_meta.get(k, 0.0) for k in global_feat_keys], dtype=np.float32)
-    constants = np.array([const_meta.get(k, 0.0) for k in const_keys], dtype=np.float32)
+    constants = np.array([const_meta.get(k, 0.0) for k ind const_keys], dtype=np.float32)
 
     return pos, normals, condition, target, constants, field_names, global_feat_keys, const_keys
 
