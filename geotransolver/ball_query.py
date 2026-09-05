@@ -17,13 +17,20 @@ def ball_query(pos: torch.Tensor, radius: float, k: int, chunk_size: int = 2048)
     idx = torch.empty(B, N, k, dtype=torch.long, device=pos.device)
     with torch.autocast(pos.device.type, enabled=False):
         pos = pos.float()
+        radius_sq = radius ** 2
+        pos_sq = (pos ** 2).sum(dim=-1)  # (B, N)
         for start in range(0, N, chunk_size):
             end = min(start + chunk_size, N)
-            dist = torch.cdist(pos[:, start:end], pos)  # (B, c, N)
-            dist = dist.masked_fill(dist > radius, float("inf"))
-            knn_dist, knn_idx = torch.topk(dist, k, dim=-1, largest=False)
+            chunk = pos[:, start:end]
+            chunk_sq = pos_sq[:, start:end]
+            
+            # dist_sq = x^2 + y^2 - 2xy
+            dist_sq = chunk_sq.unsqueeze(2) + pos_sq.unsqueeze(1) - 2 * torch.bmm(chunk, pos.transpose(1, 2))
+            
+            dist_sq = dist_sq.masked_fill(dist_sq > radius_sq, float("inf"))
+            knn_dist_sq, knn_idx = torch.topk(dist_sq, k, dim=-1, largest=False)
             self_idx = torch.arange(start, end, device=pos.device).view(1, -1, 1).expand(B, -1, k)
-            idx[:, start:end] = torch.where(torch.isinf(knn_dist), self_idx, knn_idx)
+            idx[:, start:end] = torch.where(torch.isinf(knn_dist_sq), self_idx, knn_idx)
     return idx
 
 
