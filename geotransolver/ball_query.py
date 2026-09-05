@@ -15,13 +15,15 @@ def ball_query(pos: torch.Tensor, radius: float, k: int, chunk_size: int = 2048)
     """
     B, N, _ = pos.shape
     idx = torch.empty(B, N, k, dtype=torch.long, device=pos.device)
-    for start in range(0, N, chunk_size):
-        end = min(start + chunk_size, N)
-        dist = torch.cdist(pos[:, start:end], pos)  # (B, c, N)
-        dist = dist.masked_fill(dist > radius, float("inf"))
-        knn_dist, knn_idx = torch.topk(dist, k, dim=-1, largest=False)
-        self_idx = torch.arange(start, end, device=pos.device).view(1, -1, 1).expand(B, -1, k)
-        idx[:, start:end] = torch.where(torch.isinf(knn_dist), self_idx, knn_idx)
+    with torch.autocast(pos.device.type, enabled=False):
+        pos = pos.float()
+        for start in range(0, N, chunk_size):
+            end = min(start + chunk_size, N)
+            dist = torch.cdist(pos[:, start:end], pos)  # (B, c, N)
+            dist = dist.masked_fill(dist > radius, float("inf"))
+            knn_dist, knn_idx = torch.topk(dist, k, dim=-1, largest=False)
+            self_idx = torch.arange(start, end, device=pos.device).view(1, -1, 1).expand(B, -1, k)
+            idx[:, start:end] = torch.where(torch.isinf(knn_dist), self_idx, knn_idx)
     return idx
 
 
