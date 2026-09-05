@@ -196,11 +196,28 @@ def _nonzero_dim(size: int) -> int | None:
     return size if size > 0 else None
 
 
+class RAMCacheDataset(torch.utils.data.Dataset):
+    """Preloads the base dataset into RAM to avoid massive disk I/O bottlenecks."""
+    def __init__(self, base_dataset, desc="Loading to RAM"):
+        self.items = [base_dataset[i] for i in tqdm(range(len(base_dataset)), desc=desc, leave=False)]
+
+    def __len__(self):
+        return len(self.items)
+
+    def __getitem__(self, idx):
+        return self.items[idx]
+
+
 def main():
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
+    else:
+        device = torch.device("cpu")
     BLENDEDNET_CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
     cache_dir = ensure_cache(BLENDEDNET_CACHE_DIR, BLENDEDNET_CACHE_ARCHIVE)
@@ -216,10 +233,16 @@ def main():
     val_ids = all_ids[n_test:n_test + n_val]
     fit_ids = all_ids[n_test + n_val:]
 
-    fit_ds = BlendedNetDataset(cache_dir, case_ids=fit_ids)
-    val_ds = BlendedNetDataset(cache_dir, case_ids=val_ids, stats=fit_ds.stats)
-    test_ds = BlendedNetDataset(cache_dir, case_ids=test_ids, stats=fit_ds.stats)
-    np.savez(BLENDEDNET_CKPT_DIR / "norm_stats.npz", **fit_ds.stats)
+    fit_ds_base = BlendedNetDataset(cache_dir, case_ids=fit_ids)
+    val_ds_base = BlendedNetDataset(cache_dir, case_ids=val_ids, stats=fit_ds_base.stats)
+    test_ds_base = BlendedNetDataset(cache_dir, case_ids=test_ids, stats=fit_ds_base.stats)
+    np.savez(BLENDEDNET_CKPT_DIR / "norm_stats.npz", **fit_ds_base.stats)
+
+    print("Preloading cache into RAM to prevent disk I/O starvation...")
+    fit_ds = RAMCacheDataset(fit_ds_base, desc="Fit data")
+    val_ds = RAMCacheDataset(val_ds_base, desc="Val data")
+    test_ds = RAMCacheDataset(test_ds_base, desc="Test data")
+
     print(f"data: fit={len(fit_ds)} val={len(val_ds)} test={len(test_ds)} "
           f"num_points={manifest.get('num_points')} "
           f"condition_keys={manifest.get('global_feat_keys')} "
