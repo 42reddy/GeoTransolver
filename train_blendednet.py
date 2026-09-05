@@ -76,12 +76,13 @@ DIM = 512
 DEPTH = 12
 HEADS = 8
 DIM_HEAD = 64
-NUM_SLICES = 96
+NUM_SLICES = 64
 MLP_RATIO = 4.0
 DROPOUT = 0.05
 LOCAL_RADII = (0.05, 0.25)
 LOCAL_NEIGHBORS = (8, 32)
 LOCAL_HIDDEN = 32
+
 
 
 # --------------------------------------------------------------------------
@@ -139,12 +140,13 @@ def make_lr_lambda(total_steps: int, warmup_steps: int):
 # Train / eval loops
 # --------------------------------------------------------------------------
 def run_epoch(model, loader, device, optimizer=None, amp=False, grad_clip=1.0,
-              pbar=None, phase="", const_weight=1.0, scaler=None):
+              pbar=None, phase="", const_weight=1.0):
     """pbar, if given, is a single tqdm bar (shared across train+val for the
     epoch) that gets ticked one step per batch.
 
-    Autocast uses bf16 on Ampere+ hardware, but falls back to fp16 (with a
-    GradScaler) on older hardware like T4 to avoid massive slowdowns."""
+    Autocast uses bf16 (not fp16): bf16 has the same exponent range as
+    fp32, so it can't overflow to inf the way fp16 can with a model this
+    size, which removes the need for a GradScaler."""
     train = optimizer is not None
     model.train(mode=train)
     total_loss, total_items = 0.0, 0
@@ -158,8 +160,7 @@ def run_epoch(model, loader, device, optimizer=None, amp=False, grad_clip=1.0,
         cond_arg = condition if condition.shape[-1] > 0 else None
 
         with torch.set_grad_enabled(train):
-            amp_dtype = torch.float16 if scaler is not None else torch.bfloat16
-            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp):
+            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
                 field_pred, const_pred = model(pos, geometry, cond_arg)
                 loss, breakdown = compute_loss(
                     field_pred, target, const_pred, constants, const_weight
@@ -167,16 +168,9 @@ def run_epoch(model, loader, device, optimizer=None, amp=False, grad_clip=1.0,
 
         if train:
             optimizer.zero_grad(set_to_none=True)
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                optimizer.step()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+            optimizer.step()
 
         bs = pos.shape[0]
         total_loss += loss.item() * bs
@@ -196,28 +190,11 @@ def _nonzero_dim(size: int) -> int | None:
     return size if size > 0 else None
 
 
-class RAMCacheDataset(torch.utils.data.Dataset):
-    """Preloads the base dataset into RAM to avoid massive disk I/O bottlenecks."""
-    def __init__(self, base_dataset, desc="Loading to RAM"):
-        self.items = [base_dataset[i] for i in tqdm(range(len(base_dataset)), desc=desc, leave=False)]
-
-    def __len__(self):
-        return len(self.items)
-
-    def __getitem__(self, idx):
-        return self.items[idx]
-
-
 def main():
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-    elif torch.backends.mps.is_available():
-        device = torch.device("mps")
-    else:
-        device = torch.device("cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     BLENDEDNET_CKPT_DIR.mkdir(parents=True, exist_ok=True)
 
     cache_dir = ensure_cache(BLENDEDNET_CACHE_DIR, BLENDEDNET_CACHE_ARCHIVE)
@@ -233,16 +210,10 @@ def main():
     val_ids = all_ids[n_test:n_test + n_val]
     fit_ids = all_ids[n_test + n_val:]
 
-    fit_ds_base = BlendedNetDataset(cache_dir, case_ids=fit_ids)
-    val_ds_base = BlendedNetDataset(cache_dir, case_ids=val_ids, stats=fit_ds_base.stats)
-    test_ds_base = BlendedNetDataset(cache_dir, case_ids=test_ids, stats=fit_ds_base.stats)
-    np.savez(BLENDEDNET_CKPT_DIR / "norm_stats.npz", **fit_ds_base.stats)
-
-    print("Preloading cache into RAM to prevent disk I/O starvation...")
-    fit_ds = RAMCacheDataset(fit_ds_base, desc="Fit data")
-    val_ds = RAMCacheDataset(val_ds_base, desc="Val data")
-    test_ds = RAMCacheDataset(test_ds_base, desc="Test data")
-
+    fit_ds = BlendedNetDataset(cache_dir, case_ids=fit_ids)
+    val_ds = BlendedNetDataset(cache_dir, case_ids=val_ids, stats=fit_ds.stats)
+    test_ds = BlendedNetDataset(cache_dir, case_ids=test_ids, stats=fit_ds.stats)
+    np.savez(BLENDEDNET_CKPT_DIR / "norm_stats.npz", **fit_ds.stats)
     print(f"data: fit={len(fit_ds)} val={len(val_ds)} test={len(test_ds)} "
           f"num_points={manifest.get('num_points')} "
           f"condition_keys={manifest.get('global_feat_keys')} "
@@ -290,9 +261,6 @@ def main():
     warmup_steps = int(total_steps * WARMUP_FRAC)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, make_lr_lambda(total_steps, warmup_steps))
     amp_enabled = AMP and device.type == "cuda"
-    use_scaler = amp_enabled and not torch.cuda.is_bf16_supported()
-    scaler = torch.cuda.amp.GradScaler() if use_scaler else None
-
 
     start_epoch = 0
     best_val = float("inf")
@@ -313,7 +281,6 @@ def main():
             train_loss, train_bd = run_epoch(
                 model, fit_loader, device, optimizer=optimizer, amp=amp_enabled,
                 grad_clip=GRAD_CLIP, pbar=pbar, phase="train", const_weight=CONST_LOSS_WEIGHT,
-                scaler=scaler,
             )
             for _ in range(len(fit_loader)):
                 scheduler.step()
