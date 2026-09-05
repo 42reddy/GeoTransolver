@@ -139,13 +139,12 @@ def make_lr_lambda(total_steps: int, warmup_steps: int):
 # Train / eval loops
 # --------------------------------------------------------------------------
 def run_epoch(model, loader, device, optimizer=None, amp=False, grad_clip=1.0,
-              pbar=None, phase="", const_weight=1.0):
+              pbar=None, phase="", const_weight=1.0, scaler=None):
     """pbar, if given, is a single tqdm bar (shared across train+val for the
     epoch) that gets ticked one step per batch.
 
-    Autocast uses bf16 (not fp16): bf16 has the same exponent range as
-    fp32, so it can't overflow to inf the way fp16 can with a model this
-    size, which removes the need for a GradScaler."""
+    Autocast uses bf16 on Ampere+ hardware, but falls back to fp16 (with a
+    GradScaler) on older hardware like T4 to avoid massive slowdowns."""
     train = optimizer is not None
     model.train(mode=train)
     total_loss, total_items = 0.0, 0
@@ -159,7 +158,8 @@ def run_epoch(model, loader, device, optimizer=None, amp=False, grad_clip=1.0,
         cond_arg = condition if condition.shape[-1] > 0 else None
 
         with torch.set_grad_enabled(train):
-            with torch.autocast(device_type=device.type, dtype=torch.bfloat16, enabled=amp):
+            amp_dtype = torch.float16 if scaler is not None else torch.bfloat16
+            with torch.autocast(device_type=device.type, dtype=amp_dtype, enabled=amp):
                 field_pred, const_pred = model(pos, geometry, cond_arg)
                 loss, breakdown = compute_loss(
                     field_pred, target, const_pred, constants, const_weight
@@ -167,9 +167,16 @@ def run_epoch(model, loader, device, optimizer=None, amp=False, grad_clip=1.0,
 
         if train:
             optimizer.zero_grad(set_to_none=True)
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-            optimizer.step()
+            if scaler is not None:
+                scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                optimizer.step()
 
         bs = pos.shape[0]
         total_loss += loss.item() * bs
@@ -260,6 +267,9 @@ def main():
     warmup_steps = int(total_steps * WARMUP_FRAC)
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, make_lr_lambda(total_steps, warmup_steps))
     amp_enabled = AMP and device.type == "cuda"
+    use_scaler = amp_enabled and not torch.cuda.is_bf16_supported()
+    scaler = torch.cuda.amp.GradScaler() if use_scaler else None
+
 
     start_epoch = 0
     best_val = float("inf")
@@ -280,6 +290,7 @@ def main():
             train_loss, train_bd = run_epoch(
                 model, fit_loader, device, optimizer=optimizer, amp=amp_enabled,
                 grad_clip=GRAD_CLIP, pbar=pbar, phase="train", const_weight=CONST_LOSS_WEIGHT,
+                scaler=scaler,
             )
             for _ in range(len(fit_loader)):
                 scheduler.step()
